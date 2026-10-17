@@ -1,6 +1,8 @@
 import Foundation
 import Photos
 import UIKit
+import ImageIO
+import UniformTypeIdentifiers
 
 /// 相册里的一张截图
 struct ScreenshotItem: Identifiable {
@@ -162,23 +164,46 @@ enum PhotoLibrary {
     // MARK: - 写回相册
 
     /// 把长图存进相册，返回新建的 asset 的 localIdentifier。
+    ///
+    /// 关键：长图可能高到 30000 像素（1206×30000×4 ≈ 145MB 原始像素）。
+    /// 如果用 `UIImage.pngData()` 会把整张 PNG 也压进内存，很容易被系统杀掉。
+    /// 所以这里先用 ImageIO 把 PNG 直接写到临时文件，再让相册从文件读，
+    /// 全程只有一份原始像素在内存里。
     @discardableResult
     static func savePNG(_ buffer: RGBABuffer, filename: String) async throws -> String {
         guard let cg = buffer.makeCGImage() else {
             throw PhotoLibraryError.loadFailed("无法生成长图数据")
         }
+
+        let tmpDir = FileManager.default.temporaryDirectory
+        let tmpURL = tmpDir.appendingPathComponent(filename)
+        try? FileManager.default.removeItem(at: tmpURL)
+
+        guard let dest = CGImageDestinationCreateWithURL(tmpURL as CFURL,
+                                                         "public.png" as CFString,
+                                                         1, nil) else {
+            throw PhotoLibraryError.loadFailed("无法创建 PNG 写入器")
+        }
+        CGImageDestinationAddImage(dest, cg, nil)
+        guard CGImageDestinationFinalize(dest) else {
+            throw PhotoLibraryError.loadFailed("写入 PNG 失败")
+        }
+
         var placeholderID: String?
-        try await PHPhotoLibrary.shared().performChanges {
-            let req = PHAssetCreationRequest.forAsset()
-            req.creationDate = Date()
-            let opts = PHAssetResourceCreationOptions()
-            opts.originalFilename = filename
-            // 用 PNG 无损写入。CGImage 已经是原分辨率，不会二次压缩。
-            if let data = UIImage(cgImage: cg).pngData() {
-                req.addResource(with: .photo, data: data, options: opts)
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                let req = PHAssetCreationRequest.forAsset()
+                req.creationDate = Date()
+                let opts = PHAssetResourceCreationOptions()
+                opts.originalFilename = filename
+                req.addResource(with: .photo, fileURL: tmpURL, options: opts)
                 placeholderID = req.placeholderForCreatedAsset?.localIdentifier
             }
+        } catch {
+            try? FileManager.default.removeItem(at: tmpURL)
+            throw error
         }
+        try? FileManager.default.removeItem(at: tmpURL)
         return placeholderID ?? ""
     }
 

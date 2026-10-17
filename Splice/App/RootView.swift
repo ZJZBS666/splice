@@ -343,9 +343,11 @@ private struct ResultCard: View {
                 let cut = item.element
                 let baseY = CGFloat(cut) * k
                 let dy = dragOffsets[idx] ?? 0
-                SeamHandle(color: activeSeam == idx ? Color.blue : Color.white.opacity(0.9))
+                SeamHandle(active: activeSeam == idx)
                     .position(x: viewWidth / 2, y: max(0, baseY + dy))
-                    .gesture(
+                    // 用 highPriorityGesture 抢在 ScrollView 之前拿到竖直拖动，
+                    // 否则手指一往下拉，滚的是整张长图而不是这条接缝。
+                    .highPriorityGesture(
                         DragGesture(minimumDistance: 0)
                             .onChanged { v in
                                 activeSeam = idx
@@ -370,21 +372,27 @@ private struct ResultCard: View {
 }
 
 private struct SeamHandle: View {
-    let color: Color
+    let active: Bool
 
     var body: some View {
         ZStack {
+            // 白底上白线看不见，所以画"黑线 + 白描边"的双层线：
+            // 无论长图内容是什么颜色都能看清。
             Rectangle()
-                .fill(color)
-                .frame(height: 2)
+                .fill(Color.white)
+                .frame(height: 4)
+            Rectangle()
+                .fill(active ? Color.blue : Color.black.opacity(0.55))
+                .frame(height: 1.5)
             Capsule()
-                .fill(color)
-                .frame(width: 46, height: 18)
+                .fill(active ? Color.blue : Color.black.opacity(0.72))
+                .frame(width: 46, height: 20)
                 .overlay(
                     Image(systemName: "arrow.up.and.down")
                         .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(Color.black.opacity(0.55))
+                        .foregroundStyle(Color.white)
                 )
+                .shadow(color: Color.black.opacity(0.25), radius: 2, y: 1)
         }
         .frame(width: 200, height: 34)
         .contentShape(Rectangle())
