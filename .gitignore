@@ -1,0 +1,33 @@
+# Xcode / macOS
+.DS_Store
+build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+output/
+
+# XcodeGen 生成物（由 project.yml 生成，不入库）
+*.xcodeproj/
+Splice/Generated/
+
+# 本地构建与样本
+*.ipa
+*.dSYM.zip
+splice-samples/
+prototype/samples/
+prototype/out/
+prototype/*.png
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+# 调试脚本（用完即弃，不入库）
+prototype/dbg*.py
+
+# 编辑器
+.vscode/
+.idea/
+*.swp

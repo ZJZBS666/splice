@@ -1,0 +1,133 @@
+name: Build Splice (unsigned IPA)
+
+# 这个工作流只做一件事：在云端 Mac 上把 Swift 代码编译成 Splice-unsigned.ipa
+# 不做签名 —— 签名由你在 Windows 上用爱思助手完成。
+#
+# 用法：GitHub 仓库页面 → Actions → 左边选 "Build Splice (unsigned IPA)"
+#       → 右边 "Run workflow" → 等 3~5 分钟 → 下载 Splice-unsigned-ipa
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: 编译未签名 IPA
+    # 注意：macos-14 镜像只有 Xcode 15.4，而最新版 XcodeGen 生成的是
+    # Xcode 16 格式（objectVersion 77）的工程，Xcode 15.4 打不开。
+    # 所以必须用 macos-15 镜像（自带 Xcode 16.x）。
+    runs-on: macos-15
+    timeout-minutes: 40
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 显示编译环境
+        run: |
+          xcodebuild -version
+          echo "iOS SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
+          echo "xcodegen: $(xcodegen --version 2>&1 || true)"
+          echo "可用 Xcode:"
+          ls /Applications | grep -i xcode || true
+
+      # 注意：GitHub Actions 默认用 bash -e 执行，任何一行返回非 0 就会立刻退出，
+      # 后面的错误上报代码根本不会跑。所以每个可能失败的步骤都要先 set +e。
+      - name: 生成 Xcode 工程
+        run: |
+          set +e
+          xcodegen generate > xcodegen.log 2>&1
+          STATUS=$?
+          cat xcodegen.log
+          if [ "$STATUS" -ne 0 ]; then
+            MSG=$(tail -n 20 xcodegen.log | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | tr '\n' '|' | cut -c1-3000)
+            echo "::error title=xcodegen 生成失败 exit=$STATUS::${MSG}"
+            exit 1
+          fi
+          echo "===== 生成结果 ====="
+          ls -la
+          echo "===== Splice.xcodeproj 内容 ====="
+          find Splice.xcodeproj -maxdepth 2 | head -n 40
+
+      - name: 检查工程与 scheme（诊断信息写入注解）
+        run: |
+          set +e
+          xcodebuild -list -project Splice.xcodeproj > list.log 2>&1
+          cat list.log
+          MSG=$(sed -e 's/%/%25/g' -e 's/\r/%0D/g' list.log | tr '\n' '|' | cut -c1-3000)
+          echo "::notice title=xcodebuild-list::${MSG}"
+
+      - name: 编译（关闭签名）
+        run: |
+          set +e
+          xcodebuild build \
+            -project Splice.xcodeproj \
+            -scheme Splice \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            ENABLE_BITCODE=NO \
+            > build.log 2>&1
+          STATUS=$?
+          tail -n 80 build.log
+
+          if [ "$STATUS" -ne 0 ]; then
+            ERR=$(grep -iE "error:|fatal error|The following build commands|cannot find|does not contain" build.log | head -n 12 | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | tr '\n' '|' | cut -c1-3000)
+            if [ -z "$ERR" ]; then
+              ERR=$(tail -n 12 build.log | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | tr '\n' '|' | cut -c1-3000)
+            fi
+            echo "::error title=xcodebuild 失败 exit=$STATUS::${ERR}"
+            exit "$STATUS"
+          fi
+          echo "编译成功"
+
+      - name: 打包成 IPA
+        run: |
+          set +e
+          APP_PATH="$RUNNER_TEMP/dd/Build/Products/Release-iphoneos/Splice.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "===== 没找到 Splice.app，产物目录如下 ====="
+            find "$RUNNER_TEMP/dd/Build/Products" -maxdepth 3
+            MSG=$(find "$RUNNER_TEMP/dd/Build/Products" -maxdepth 3 | tr '\n' '|' | cut -c1-3000)
+            echo "::error title=找不到 Splice.app::${MSG}"
+            exit 1
+          fi
+
+          echo "===== App 内容 ====="
+          ls -la "$APP_PATH"
+
+          rm -rf output
+          mkdir -p output/Payload
+          cp -R "$APP_PATH" output/Payload/
+
+          cd output
+          zip -qry Splice-unsigned.ipa Payload
+          cd ..
+
+          ls -lh output
+          echo "IPA 大小：$(du -h output/Splice-unsigned.ipa | cut -f1)"
+
+          # 把包内清单写进注解，方便在网页上直接核对（不依赖读日志）
+          MANIFEST=$( (echo "--- Payload 结构 ---"; find output/Payload -maxdepth 4 | sed "s|output/Payload/||" | head -n 40; \
+                       echo "--- App 可执行文件大小 ---"; ls -lh "$APP_PATH/Splice" 2>/dev/null || true; \
+                       echo "--- Info.plist 关键字段 ---"; \
+                       plutil -p "$APP_PATH/Info.plist" 2>/dev/null | grep -iE "CFBundleIdentifier|MinimumOSVersion|NSPhotoLibrary|UILaunchScreen" || true ) \
+                     | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | tr '\n' '|' | cut -c1-3500)
+          echo "::notice title=包内清单::${MANIFEST}"
+
+      - name: 上传 IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Splice-unsigned-ipa
+          path: output/Splice-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 90
