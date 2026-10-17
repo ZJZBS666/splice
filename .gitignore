@@ -16,6 +16,7 @@ Splice/Generated/
 *.ipa
 *.dSYM.zip
 splice-samples/
+samples/
 prototype/samples/
 prototype/out/
 prototype/*.png
