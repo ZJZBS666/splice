@@ -484,26 +484,37 @@ enum Stitcher {
     }
 
     /// 把 plan 出来的片段拼成一张图。
-    /// cropped[0] 在 keepFirstChrome 时前面多出 chromeH 行（保留的状态栏+导航栏）。
-    static func render(_ cropped: [RGBABuffer],
+    ///
+    /// 直接从未裁剪的原图里取行（而不是先给每张做一份 `cropped` 副本）。
+    /// 这是纯内存优化，输出像素与旧实现完全一致：
+    /// 旧写法要额外持有 12 份裁剪副本（约 130MB），在手机上很容易被系统杀掉。
+    ///
+    /// 坐标换算：`Segment.startRow` 是"内容区坐标"。
+    ///   - 第 0 张且保留 chrome 时，内容区从原图第 `chromeH` 行开始
+    ///   - 其余情况内容区从原图第 `top` 行开始
+    static func render(_ images: [RGBABuffer],
                        segments: [Segment],
+                       top: Int,
+                       bottom: Int,
                        chromeH: Int) -> RGBABuffer {
-        let W = cropped[0].width
+        let W = images[0].width
         var totalH = 0
         for s in segments {
             totalH += ((s.imageIndex == 0) ? chromeH : 0) + s.rowCount
         }
-        var out = RGBABuffer(width: W, height: max(totalH, 1), colorSpace: cropped[0].colorSpace)
+        var out = RGBABuffer(width: W, height: max(totalH, 1), colorSpace: images[0].colorSpace)
         let rowBytes = W * 4
         var cursor = 0
+        // 单张图允许拷贝到的最大行号（不含），保证不会把底部覆盖层抄进长图
+        let maxRow = max(0, images[0].height - bottom)
 
         out.pixels.withUnsafeMutableBufferPointer { dst in
             let dp = dst.baseAddress!
 
             func copyRows(_ src: RGBABuffer, from: Int, rows: Int) {
                 guard rows > 0 else { return }
-                let s = min(max(from, 0), src.height)
-                let take = min(rows, src.height - s)
+                let s = min(max(from, 0), min(src.height, maxRow))
+                let take = min(rows, min(src.height, maxRow) - s)
                 guard take > 0 else { return }
                 src.pixels.withUnsafeBufferPointer { sp in
                     memcpy(dp + cursor * rowBytes,
@@ -520,44 +531,51 @@ enum Stitcher {
             }
 
             for s in segments {
-                let src = cropped[s.imageIndex]
-                if s.imageIndex == 0 && chromeH > 0 {
+                let src = images[s.imageIndex]
+                let hasChrome = (s.imageIndex == 0 && chromeH > 0)
+                if hasChrome {
                     copyRows(src, from: 0, rows: chromeH)
-                    copyRows(src, from: chromeH + s.startRow, rows: s.rowCount)
-                } else {
-                    copyRows(src, from: s.startRow, rows: s.rowCount)
                 }
+                let base = hasChrome ? chromeH : top
+                copyRows(src, from: base + s.startRow, rows: s.rowCount)
             }
         }
         return out.cropped(top: 0, bottom: max(0, out.height - cursor))
     }
 
     /// 遇到"没找到重叠"的接缝时用的简单拼接：两张直接首尾相接，中间加一条分隔线。
-    static func renderWithGaps(_ cropped: [RGBABuffer],
+    /// 同样直接从未裁剪原图取行，不额外做 `cropped` 副本。
+    static func renderWithGaps(_ images: [RGBABuffer],
                                offsets: [Int?],
+                               top: Int,
+                               bottom: Int,
                                contentHeight: Int,
                                chromeH: Int) -> RGBABuffer {
-        let W = cropped[0].width
-        var totalH = cropped[0].height
+        let W = images[0].width
+        // 第 0 张：保留 chrome 时从第 0 行起，否则从内容区顶端 top 起；都止于 H-bottom
+        let firstStart = chromeH > 0 ? 0 : top
+        let firstRows = max(0, images[0].height - bottom - firstStart)
+        var totalH = firstRows
         for (i, d) in offsets.enumerated() {
             if let d = d {
                 totalH += d
             } else {
-                totalH += StitchParams.dividerHeight + cropped[i + 1].height
+                totalH += StitchParams.dividerHeight + (images[i + 1].height - top - bottom)
             }
         }
 
-        var out = RGBABuffer(width: W, height: max(totalH, 1), colorSpace: cropped[0].colorSpace)
+        var out = RGBABuffer(width: W, height: max(totalH, 1), colorSpace: images[0].colorSpace)
         let rowBytes = W * 4
         var cursor = 0
+        let maxRow = max(0, images[0].height - bottom)
 
         out.pixels.withUnsafeMutableBufferPointer { dst in
             let dp = dst.baseAddress!
 
             func append(_ src: RGBABuffer, from: Int, rows: Int) {
                 guard rows > 0 else { return }
-                let s = min(max(from, 0), src.height)
-                let take = min(rows, src.height - s)
+                let s = min(max(from, 0), min(src.height, maxRow))
+                let take = min(rows, min(src.height, maxRow) - s)
                 guard take > 0 else { return }
                 src.pixels.withUnsafeBufferPointer { sp in
                     memcpy(dp + cursor * rowBytes,
@@ -581,26 +599,29 @@ enum Stitcher {
                 cursor += StitchParams.dividerHeight
             }
 
-            append(cropped[0], from: 0, rows: cropped[0].height)
+            append(images[0], from: firstStart, rows: firstRows)
             for (i, d) in offsets.enumerated() {
-                let src = cropped[i + 1]
+                let src = images[i + 1]
                 if let d = d {
-                    append(src, from: max(0, contentHeight - d), rows: src.height)
+                    // 只取"新露出来的 d 行"：内容区第 contentHeight-d 行开始
+                    append(src, from: top + (contentHeight - d), rows: d)
                 } else {
                     divider()
-                    append(src, from: 0, rows: src.height)
+                    append(src, from: top, rows: contentHeight)
                 }
             }
         }
         return out.cropped(top: 0, bottom: max(0, out.height - cursor))
     }
 
-    /// 拼一组（调用方保证这一组属于同一次长截图）。
-    /// keepFirstChrome: 第一张的状态栏+导航栏保留在长图最上方，后续截图裁掉。
-    static func stitchGroup(_ images: [RGBABuffer],
-                            keepFirstChrome: Bool = true) -> StitchResult {
+    /// 分析一组截图：量覆盖层 + 求每对相邻截图的滚动量。
+    ///
+    /// 单独抽出来是为了**及时释放灰度图**：灰度图占用的内存和原图一样大
+    /// （12 张 1206×2622 的 Float 灰度图约 150MB），一旦进入渲染阶段就不再需要，
+    /// 而渲染要新分配一张最多 145MB 的长图。放在同一个函数里两者会同时存活。
+    static func analyze(_ images: [RGBABuffer]) -> (top: Int, bottom: Int,
+                                                    offsets: [Int?], seams: [Seam]) {
         let grays = images.map { $0.grayscale() }
-        let H = grays[0].height
         let (top, bottom) = detectOverlays(grays)
 
         var offsets = [Int?]()
@@ -610,39 +631,39 @@ enum Stitcher {
             offsets.append(d)
             seams.append(Seam(index: i, offset: d, confidence: f))
         }
+        return (top, bottom, offsets, seams)
+    }
 
-        return assemble(images, grays: grays, top: top, bottom: bottom,
-                        offsets: offsets, seams: seams,
+    /// 拼一组（调用方保证这一组属于同一次长截图）。
+    /// keepFirstChrome: 第一张的状态栏+导航栏保留在长图最上方，后续截图裁掉。
+    static func stitchGroup(_ images: [RGBABuffer],
+                            keepFirstChrome: Bool = true) -> StitchResult {
+        let a = analyze(images)
+        return assemble(images, top: a.top, bottom: a.bottom,
+                        offsets: a.offsets, seams: a.seams,
                         keepFirstChrome: keepFirstChrome)
     }
 
     /// 已知道 offsets 时直接组装（拖动接缝后重拼走这条路，不用再搜一遍）。
     static func assemble(_ images: [RGBABuffer],
-                         grays: [GrayImage]?,
                          top: Int,
                          bottom: Int,
                          offsets: [Int?],
                          seams: [Seam],
                          keepFirstChrome: Bool) -> StitchResult {
-        // 每张都裁掉底部覆盖层；顶部只有第一张保留
-        var cropped = [RGBABuffer]()
-        cropped.reserveCapacity(images.count)
-        for (i, img) in images.enumerated() {
-            let y0 = (i == 0 && keepFirstChrome) ? 0 : top
-            cropped.append(img.cropped(top: y0, bottom: bottom))
-        }
-        let contentH = (grays?.first?.height ?? images[0].height) - top - bottom
+        let contentH = images[0].height - top - bottom
         let chromeH = keepFirstChrome ? top : 0
 
         var cuts: [Int] = []
         var out: RGBABuffer
         if offsets.contains(where: { $0 == nil }) {
-            out = renderWithGaps(cropped, offsets: offsets, contentHeight: contentH, chromeH: chromeH)
+            out = renderWithGaps(images, offsets: offsets, top: top, bottom: bottom,
+                                 contentHeight: contentH, chromeH: chromeH)
         } else {
             let ints = offsets.map { $0! }
             cuts = defaultCuts(ints, contentHeight: contentH)
             let segs = plan(ints, contentHeight: contentH, cuts: cuts)
-            out = render(cropped, segments: segs, chromeH: chromeH)
+            out = render(images, segments: segs, top: top, bottom: bottom, chromeH: chromeH)
         }
 
         return StitchResult(indices: Array(0..<images.count),
@@ -667,33 +688,28 @@ enum Stitcher {
         let ints = offsets.map { $0! }
         let contentH = images[0].height - top - bottom
         let chromeH = keepFirstChrome ? top : 0
-        var cropped = [RGBABuffer]()
-        cropped.reserveCapacity(images.count)
-        for (i, img) in images.enumerated() {
-            let y0 = (i == 0 && keepFirstChrome) ? 0 : top
-            cropped.append(img.cropped(top: y0, bottom: bottom))
-        }
         let segs = plan(ints, contentHeight: contentH, cuts: cuts)
-        return render(cropped, segments: segs, chromeH: chromeH)
+        return render(images, segments: segs, top: top, bottom: bottom, chromeH: chromeH)
     }
 
-    /// 把一串截图自动分成若干组，每组拼一张长图。
+    /// 分组分析结果。渲染阶段只靠这个结构就够了，不再需要灰度图。
+    struct GroupPlan {
+        var indices: [Int]
+        var top: Int
+        var bottom: Int
+        var offsets: [Int?]
+        var fracs: [Float]
+    }
+
+    /// 阶段 1：只用灰度图做全部分析，返回分组方案。
     ///
-    /// 分组规则（任一命中就断开）：
-    ///   1. 时间间隔 > groupTimeGap 秒 —— 主信号，最可靠
-    ///   2. 相邻两张找不到可信的滚动偏移 —— 兜底
-    ///
-    /// 性能要点：每对相邻截图只搜一次偏移，结果缓存下来给后面的组装复用。
-    /// 否则 10 张图要搜 9 + 9 次，手机上会明显卡顿。
-    static func stitchAll(_ images: [RGBABuffer],
-                          timestamps: [TimeInterval]? = nil,
-                          keepFirstChrome: Bool = true) -> [StitchResult] {
-        guard !images.isEmpty else { return [] }
-        if images.count == 1 {
-            return [stitchGroup(images, keepFirstChrome: keepFirstChrome)]
-        }
-        let grays = images.map { $0.grayscale() }
+    /// 单独抽成函数是为了让灰度图在返回时**立刻释放**。灰度图总内存和原图相当
+    /// （12 张 1206×2622 的 Float 灰度图约 150MB），而渲染阶段还要新分配
+    /// 一张最多 145MB 的长图；两者若同时存活，真机上很容易被系统杀掉。
+    static func analyzeAll(_ images: [RGBABuffer],
+                           timestamps: [TimeInterval]?) -> [GroupPlan] {
         let n = images.count
+        let grays = images.map { $0.grayscale() }
 
         // 逐对求偏移（用这一对自身的覆盖层高度，避免不同来源的截图互相污染）
         var pairOffsets = [Int?](repeating: nil, count: n - 1)
@@ -720,26 +736,55 @@ enum Stitcher {
         }
         groups.append(Array(start..<n))
 
-        var results = [StitchResult]()
-        results.reserveCapacity(groups.count)
+        var plans = [GroupPlan]()
+        plans.reserveCapacity(groups.count)
         for g in groups {
-            let sub = g.map { images[$0] }
-            let subGrays = g.map { grays[$0] }
             // 组内重新量一次覆盖层（组内截图风格一致，比逐对更稳）
-            let (top, bottom) = detectOverlays(subGrays)
-
+            let (top, bottom) = detectOverlays(g.map { grays[$0] })
             var offsets = [Int?]()
-            var seams = [Seam]()
+            var fracs = [Float]()
             for k in 0..<(g.count - 1) {
-                let gi = g[k]
-                let d = pairOffsets[gi]
-                offsets.append(d)
-                seams.append(Seam(index: k, offset: d, confidence: pairFrac[gi]))
+                offsets.append(pairOffsets[g[k]])
+                fracs.append(pairFrac[g[k]])
             }
-            var r = assemble(sub, grays: subGrays, top: top, bottom: bottom,
-                             offsets: offsets, seams: seams,
+            plans.append(GroupPlan(indices: g, top: top, bottom: bottom,
+                                   offsets: offsets, fracs: fracs))
+        }
+        return plans
+    }
+
+    /// 把一串截图自动分成若干组，每组拼一张长图。
+    ///
+    /// 分组规则（任一命中就断开）：
+    ///   1. 时间间隔 > groupTimeGap 秒 —— 主信号，最可靠
+    ///   2. 相邻两张找不到可信的滚动偏移 —— 兜底
+    ///
+    /// 性能要点：每对相邻截图只搜一次偏移，结果缓存下来给后面的组装复用。
+    /// 否则 10 张图要搜 9 + 9 次，手机上会明显卡顿。
+    static func stitchAll(_ images: [RGBABuffer],
+                          timestamps: [TimeInterval]? = nil,
+                          keepFirstChrome: Bool = true) -> [StitchResult] {
+        guard !images.isEmpty else { return [] }
+        if images.count == 1 {
+            return [stitchGroup(images, keepFirstChrome: keepFirstChrome)]
+        }
+
+        // 阶段 1：分析（此函数返回后灰度图即被释放）
+        let plans = analyzeAll(images, timestamps: timestamps)
+
+        // 阶段 2：渲染（内存里只剩原图和正在生成的长图）
+        var results = [StitchResult]()
+        results.reserveCapacity(plans.count)
+        for p in plans {
+            let sub = p.indices.map { images[$0] }
+            var seams = [Seam]()
+            for k in 0..<p.offsets.count {
+                seams.append(Seam(index: k, offset: p.offsets[k], confidence: p.fracs[k]))
+            }
+            var r = assemble(sub, top: p.top, bottom: p.bottom,
+                             offsets: p.offsets, seams: seams,
                              keepFirstChrome: keepFirstChrome)
-            r.indices = g
+            r.indices = p.indices
             results.append(r)
         }
         return results

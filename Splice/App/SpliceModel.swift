@@ -263,14 +263,25 @@ final class SpliceModel: ObservableObject {
 
     // MARK: - 预览图
 
-    /// 生成界面用的缩略图（最长边 2048，省内存）
+    /// 生成界面用的缩略图。
+    ///
+    /// 按"总像素预算"缩放，而不是"最长边"。长图高度动辄 8000~30000 像素，
+    /// 若按最长边 2048 缩放，宽度会缩到 270 左右，在 390pt 宽的卡片里
+    /// 会被放大三倍，糊成一片，接缝手柄也对不准。
+    ///
+    /// 预算 8M 像素（约 32MB）：
+    ///   1206×9000  → 几乎不缩（1098×8192）
+    ///   1206×30000 → 缩到 567×14100，虽然窄，但预览窗口只有 320pt 高，
+    ///                本来也看不清细节，接缝手柄按比例定位仍然准确。
     private func makePreview(_ buf: RGBABuffer) -> UIImage? {
         guard let cg = buf.makeCGImage() else { return nil }
-        let maxSide = 2048.0
+        let maxPixels = 8_000_000.0
         let w = Double(cg.width), h = Double(cg.height)
-        let scale = min(1.0, maxSide / max(w, h))
-        if scale >= 1.0 { return UIImage(cgImage: cg) }
-        let tw = Int(w * scale), th = Int(h * scale)
+        let pixels = max(w * h, 1)
+        let scale = min(1.0, (maxPixels / pixels).squareRoot())
+        if scale >= 0.999 { return UIImage(cgImage: cg) }
+        let tw = max(1, Int((w * scale).rounded()))
+        let th = max(1, Int((h * scale).rounded()))
         guard let ctx = CGContext(data: nil,
                                   width: tw, height: th,
                                   bitsPerComponent: 8, bytesPerRow: 0,
