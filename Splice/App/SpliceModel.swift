@@ -318,6 +318,11 @@ final class SpliceModel: ObservableObject {
             statusText = deleteOriginals
                 ? "已保存 \(savedCount) 张长图到相册，原图已移到「最近删除」。"
                 : "已保存 \(savedCount) 张长图到相册。"
+            // 长图已经写进相册了，内存里这份 100MB+ 的像素没必要再留着。
+            // 不释放的话，用户接着再拼一组（App 还没被系统杀掉）就会翻倍。
+            results = []
+            loadedImages = [:]
+            sourceItems = []
         }
     }
 
