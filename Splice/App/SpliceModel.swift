@@ -45,6 +45,15 @@ struct ResultVM: Identifiable {
     var pixelHeight: Int { fullImage.height }
 }
 
+/// 跨线程搬运 UIImage 的包装。
+///
+/// `UIImage` 没有标 `Sendable`，直接从 `Task.detached` 里返回会触发
+/// 并发检查警告。但这里只有一处生成、一处读取，不存在真正的并发访问，
+/// 所以用 `@unchecked Sendable` 明确声明。
+struct PreviewBox: @unchecked Sendable {
+    let image: UIImage?
+}
+
 @MainActor
 final class SpliceModel: ObservableObject {
     @Published var phase: Phase = .idle
@@ -69,6 +78,10 @@ final class SpliceModel: ObservableObject {
     let maxHeight = StitchParams.maxOutputHeight
 
     private var loadedImages: [Int: RGBABuffer] = [:]
+
+    /// 是否正在后台重拼。拖动接缝会连续触发重拼，
+    /// 上一次还没结束就丢掉这次，否则两次结果会互相覆盖、画面跳回旧位置。
+    private var isRerendering = false
 
     private let defaults = UserDefaults.standard
     private enum Keys {
@@ -170,7 +183,7 @@ final class SpliceModel: ObservableObject {
         progress = 0.95
         var vms: [ResultVM] = []
         for g in groups {
-            let preview = makePreview(g.image)
+            let preview = SpliceModel.makePreview(g.image)
             vms.append(ResultVM(indices: g.indices,
                                 preview: preview,
                                 fullImage: g.image,
@@ -201,9 +214,14 @@ final class SpliceModel: ObservableObject {
     // MARK: - 拖动接缝
 
     /// 用户拖动某条接缝后调用。delta 为屏幕坐标下的位移（正数向下）。
-    func adjustCut(resultID: UUID, seamIndex: Int, deltaPixels: Int, displayScale: CGFloat) {
+    ///
+    /// 重拼要在后台线程做：长图最高 30000 像素（约 145MB），
+    /// 在主线程里 memcpy + 缩放预览会卡住界面几百毫秒，看起来像 App 卡死了。
+    func adjustCut(resultID: UUID, seamIndex: Int, deltaPixels: Int, displayScale: CGFloat) async {
+        // 上一次重拼还没结束就忽略这次，否则两次结果会互相覆盖
+        guard !isRerendering else { return }
         guard let ri = results.firstIndex(where: { $0.id == resultID }) else { return }
-        var r = results[ri]
+        let r = results[ri]
         guard r.canAdjustSeams, seamIndex >= 0, seamIndex < r.cuts.count else { return }
 
         let offsets = r.seams.compactMap { $0.offset }
@@ -214,20 +232,36 @@ final class SpliceModel: ObservableObject {
         var cuts = r.cuts
         let delta = Int(Double(deltaPixels) / Double(max(displayScale, 0.01)))
         cuts[seamIndex] = min(max(cuts[seamIndex] + delta, range.lowerBound), range.upperBound)
+        guard cuts != r.cuts else { return }
 
         let sub = r.indices.compactMap { loadedImages[$0] }
-        guard sub.count == r.indices.count,
-              let img = Stitcher.restitch(sub,
-                                          top: r.topOverlay,
-                                          bottom: r.bottomOverlay,
-                                          offsets: r.seams.map { $0.offset },
-                                          cuts: cuts,
-                                          keepFirstChrome: keepFirstChrome) else { return }
+        guard sub.count == r.indices.count else { return }
 
-        r.cuts = cuts
-        r.fullImage = img
-        r.preview = makePreview(img)
-        results[ri] = r
+        let top = r.topOverlay
+        let bottom = r.bottomOverlay
+        let offs = r.seams.map { $0.offset }
+        let keep = keepFirstChrome
+
+        isRerendering = true
+        defer { isRerendering = false }
+
+        // 重拼 + 生成预览都在后台线程完成。预览那一步的缩放
+        // （145MB → 32MB）同样要几百毫秒，留在主线程照样会卡。
+        let made = await Task.detached(priority: .userInitiated) { () -> (RGBABuffer, PreviewBox)? in
+            guard let img = Stitcher.restitch(sub, top: top, bottom: bottom,
+                                              offsets: offs, cuts: cuts,
+                                              keepFirstChrome: keep) else { return nil }
+            return (img, PreviewBox(image: SpliceModel.makePreview(img)))
+        }.value
+        guard let made = made else { return }
+
+        // 重拼期间用户可能点了「再来一次」把 results 清空了，重新定位一次
+        guard let ri2 = results.firstIndex(where: { $0.id == resultID }) else { return }
+        var r2 = results[ri2]
+        r2.cuts = cuts
+        r2.fullImage = made.0
+        r2.preview = made.1.image
+        results[ri2] = r2
     }
 
     // MARK: - 保存
@@ -298,17 +332,20 @@ final class SpliceModel: ObservableObject {
 
     // MARK: - 预览图
 
-    /// 生成界面用的缩略图。
+    /// 把整张长图缩成界面用的预览图。
     ///
-    /// 按"总像素预算"缩放，而不是"最长边"。长图高度动辄 8000~30000 像素，
-    /// 若按最长边 2048 缩放，宽度会缩到 270 左右，在 390pt 宽的卡片里
-    /// 会被放大三倍，糊成一片，接缝手柄也对不准。
+    /// 为什么不用"最长边缩到 2048"：长图高 8000~30000、宽只有 1206，
+    /// 按最长边缩放会让宽度只剩 270，卡片里被放大三倍糊成一片，
+    /// 接缝手柄也对不准。改成按"总像素预算"缩放，宽度能保住。
     ///
     /// 预算 8M 像素（约 32MB）：
     ///   1206×9000  → 几乎不缩（1098×8192）
     ///   1206×30000 → 缩到 567×14100，虽然窄，但预览窗口只有 320pt 高，
     ///                本来也看不清细节，接缝手柄按比例定位仍然准确。
-    private func makePreview(_ buf: RGBABuffer) -> UIImage? {
+    ///
+    /// 写成 `nonisolated static` 是为了能在后台线程调用 —— 缩放本身
+    /// 也要几百毫秒，留在主线程会卡界面。它不读任何实例状态，安全。
+    nonisolated static func makePreview(_ buf: RGBABuffer) -> UIImage? {
         guard let cg = buf.makeCGImage() else { return nil }
         let maxPixels = 8_000_000.0
         let w = Double(cg.width), h = Double(cg.height)

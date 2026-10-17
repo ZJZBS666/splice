@@ -359,10 +359,14 @@ private struct ResultCard: View {
                                 let deltaPixels = Int((v.translation.height * scale).rounded())
                                 dragOffsets[idx] = nil
                                 if deltaPixels != 0 {
-                                    model.adjustCut(resultID: result.id,
-                                                    seamIndex: idx,
-                                                    deltaPixels: deltaPixels,
-                                                    displayScale: 1)
+                                    // 重拼在后台线程做（最高 30000px 的长图要几百毫秒），
+                                    // 所以这里必须包成 Task，不能直接同步调用。
+                                    Task {
+                                        await model.adjustCut(resultID: result.id,
+                                                              seamIndex: idx,
+                                                              deltaPixels: deltaPixels,
+                                                              displayScale: 1)
+                                    }
                                 }
                             }
                     )
