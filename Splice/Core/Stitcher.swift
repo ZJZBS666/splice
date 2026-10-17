@@ -20,6 +20,10 @@ enum StitchParams {
     static let minMatchRows = 30
     static let maxExcludedFrac: Float = 0.90
     static let staticEps: Float = 1.5
+    /// 判定"像素真的变了"的阈值
+    static let changeEps: Float = 2.0
+    /// 一行里允许变动的像素占比上限（状态栏时钟只占 ~4%，仍算静止）
+    static let staticChangedFrac: Double = 0.10
     static let maxOverlayFrac = 0.22
     static let minOverlayH = 60
     static let homeIslandZone = 0.10
@@ -77,13 +81,18 @@ enum Stitcher {
 
     // MARK: - 覆盖层探测
 
-    /// 返回每行是否"在所有截图里完全一致"。
+    /// 返回每行是否"在所有截图里基本一致"。
     ///
-    /// 语义必须和 Python 原型完全一致：
-    ///   diff[y] = max over 所有截图对 ( mean over x |a - b| )
-    ///   static[y] = diff[y] < STATIC_EPS
-    /// 注意是"行内平均绝对差"，不是"行内最大差"。两者在覆盖层上都是 0，
-    /// 但内容里的稀疏文字行差别很大，用最大差会误判成非静止，导致覆盖层变短。
+    /// 判定：该行里"被改动的像素"占比 <= STATIC_CHANGED_FRAC 就算静止。
+    ///
+    /// 为什么不用"行内平均绝对差 < STATIC_EPS"：
+    /// 真机状态栏左上角的**时钟**在两次截图之间会变（9:41 → 9:42）。
+    /// 时钟只占 1206 像素宽里的几十个像素，但平均差会被拉到 40 以上，
+    /// 于是状态栏那几行被判成"非静止"，top 从 318 缩到 60 左右，
+    /// 结果就是每段内容上面都重复贴一条状态栏。
+    ///
+    /// 截图是 PNG（无损），没变的像素**一定**完全相等，所以按"改动像素占比"
+    /// 判断既准确又不会被时钟、电池图标、信号格这类小区域变化骗到。
     static func staticRows(_ grays: [GrayImage]) -> [Bool] {
         if grays.isEmpty { return [] }
         let H = grays[0].height
@@ -100,10 +109,11 @@ enum Stitcher {
         }()
 
         var isStatic = [Bool](repeating: true, count: H)
-        let invW = 1.0 / Float(W)
+        // 一行里最多允许多少个像素不同
+        let maxChanged = max(1, Int(StitchParams.staticChangedFrac * Double(W)))
         var scratch = [Float](repeating: 0, count: W)
-        var sum: Float = 0
         let N = vDSP_Length(W)
+        let eps = StitchParams.changeEps
 
         for (i, j) in pairs {
             grays[i].data.withUnsafeBufferPointer { a in
@@ -114,14 +124,18 @@ enum Stitcher {
                         let sp = sc.baseAddress!
                         for y in 0..<H where isStatic[y] {
                             let base = y * W
-                            // scratch = a - b
                             vDSP_vsub(ap + base, 1, bp + base, 1, sp, 1, N)
-                            // scratch = |scratch|
                             vDSP_vabs(sp, 1, sp, 1, N)
-                            // sum = Σ scratch
-                            vDSP_sve(sp, 1, &sum, N)
-                            if sum * invW >= StitchParams.staticEps {
-                                isStatic[y] = false
+                            // 数一数有多少个像素真的变了；超过上限就提前判否
+                            var changed = 0
+                            for x in 0..<W {
+                                if sp[x] >= eps {
+                                    changed += 1
+                                    if changed > maxChanged {
+                                        isStatic[y] = false
+                                        break
+                                    }
+                                }
                             }
                         }
                     }

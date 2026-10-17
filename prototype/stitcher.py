@@ -48,7 +48,10 @@ MATCH_FRAC_THRESHOLD = 0.55  # 正确偏移的精确匹配行占比下限
 EXACT_EPS = 0.5           # 灰度差低于它算"这一行完全匹配"
 MIN_MATCH_ROWS = 30       # 至少要有这么多行真的匹配上，否则不算"找到重叠"
 MAX_EXCLUDED_FRAC = 0.90  # 被排除（视频/进度条）的行占比上限
-STATIC_EPS = 1.5          # 跨截图行差异低于它 → 视为"静止行"（覆盖层）
+STATIC_EPS = 1.5          # 已废弃：旧的"行内平均差"判据，保留常量以免别处引用报错
+CHANGE_EPS = 2.0          # 灰度差 >= 它才算"这个像素真的变了"
+STATIC_CHANGED_FRAC = 0.10  # 一行里允许变动的像素占比上限
+                            # （状态栏时钟只占 ~2%，仍算静止行）
 MAX_OVERLAY_FRAC = 0.22   # 单侧覆盖层高度上限（占屏高）
 MIN_OVERLAY_H = 60        # 紧贴边缘的覆盖层最小高度
 # iOS 小白条（home indicator）固定在屏幕绝对位置、但不紧贴底边，
@@ -81,15 +84,30 @@ def box_downsample(g, scale):
 # ---------------------------------------------------------------- 覆盖层探测
 
 def static_rows(grays):
-    """返回 (H,) bool：True 表示这一行在所有截图里完全一致。
-    固定覆盖层（状态栏/导航栏/底部条）必然满足。"""
+    """返回 (H,) bool：True 表示这一行在所有截图里基本一致。
+
+    判定：该行里"被改动的像素"占比 <= STATIC_CHANGED_FRAC 就算静止。
+
+    为什么不用"行内平均绝对差 < STATIC_EPS"：
+    真机状态栏左上角的**时钟**在两次截图之间会变（9:41 -> 9:42）。
+    时钟只占 1206 像素宽里的几十个像素，但平均差会被拉到 3 以上，
+    于是状态栏那几行被判成"非静止"，top 从 318 缩到 77 左右，
+    结果就是每段内容上面都重复贴一条状态栏。
+    （见 test_clock.py：旧逻辑 top=77，新逻辑 top=366，真值 318）
+
+    截图是 PNG（无损），没变的像素**一定**完全相等，所以按"改动像素占比"
+    判断既准确又不会被时钟、电池图标、信号格这类小区域变化骗到。
+    """
     H = grays[0].shape[0]
-    diff = np.zeros(H, dtype=np.float32)
+    W = grays[0].shape[1]
+    max_changed = max(1, int(STATIC_CHANGED_FRAC * W))
+    st = np.ones(H, dtype=bool)
     n = len(grays)
     for i in range(n):
         for j in range(i + 1, n):
-            diff = np.maximum(diff, np.abs(grays[i] - grays[j]).mean(axis=1))
-    return diff < STATIC_EPS
+            changed = (np.abs(grays[i] - grays[j]) >= CHANGE_EPS).sum(axis=1)
+            st &= changed <= max_changed
+    return st
 
 
 def detect_overlays(grays):
