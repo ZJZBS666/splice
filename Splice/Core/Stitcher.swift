@@ -47,7 +47,19 @@ enum StitchParams {
     static let bandCount = 4
     static let bandWin = 8
     static let bandAgreeTol = 1
-    static let minBandAgree = 3
+    static let minBandAgree = 2
+    /// 某一带在 d±bandWin 内的代价曲线如果几乎是平的，说明这一段内容在两张图里
+    /// 本来就一样（空白背景、重复的输入框），它的 argmin 纯属噪声，不该投票反对。
+    /// 实测：真匹配的有信息带 spread > 0.3，平坦带 < 0.12；
+    /// 而无关两图的**每一个**带 spread 都 < 0.05 —— 平坦带弃权后无关两图得到
+    /// agree=0，真匹配仍能拿到 agree>=2，分离度反而更大。
+    static let bandSpreadMin: Float = 0.05
+    /// 投"同意"票的带，它自己的最小代价必须低于这个值。
+    /// 实测：真匹配的同意带 min cost 全部 <= 0.90（亚像素/视频最差 0.66，真实微信 0.63），
+    /// 无关两图的带 min cost 全部 >= 2.04。
+    /// 平坦带弃权只能挡掉"没有信息"的带，挡不住"两图都同样花"的无关图 ——
+    /// 后者代价曲线有峰但整体很高，所以必须再补这条绝对上限。
+    static let bandMaxCost: Float = 1.0
     /// 粗搜取前几个候选逐个精修+投票：接近搜索上界的候选只有很少的行可比，
     /// 随机噪声也能压出低代价（实测 seed888/tail=0.5 时粗搜 argmin 落在 2463，
     /// 真值 1438，那个位置分带一致性只有 1/4，而真值是 4/4）。
@@ -62,6 +74,16 @@ enum StitchParams {
     static let staticChangedFrac: Double = 0.10
     static let maxOverlayFrac = 0.22
     static let minOverlayH = 60
+    /// 三分类判据里"行均值差 >= 它才算变了"的阈值。
+    /// 实测：真实微信 JPEG 用 6.0 得到 top=318/bottom=270（真值 318/276）；
+    /// 合成 PNG 用 6.0 也精确命中（top=321、bottom 与 content_bottom_bar 一致）。
+    static let classifyThr: Float = 6.0
+    /// 悬浮覆盖层（不贴底边、下面还露出滚动内容）的"固定带"判据。
+    /// iOS 26 设置页的搜索胶囊就固定在 y≈2394..2538，下面仍有内容在滚。
+    /// 这类带子里内容**不会在任何位置重现**，所以 shift = |A[y]-B[y-d]| 一直很大；
+    /// 而正常滚动内容总有某个 d 让 shift 很小。
+    /// 固定带必须延伸到"距底边 12% 屏高"以内才算底部覆盖层。
+    static let overlayBandEndNear: Double = 0.12
     static let homeIslandZone = 0.10
     static let homeIslandMinH = 3
     static let homeIslandMaxH = 120
@@ -233,6 +255,148 @@ enum Stitcher {
             return (0, 0)
         }
         return (top, bottom)
+    }
+
+    /// 用已知的滚动量 d 判定**底部**覆盖层高度（真机唯一可靠的判据）。
+    ///
+    /// 为什么不能用"跨截图静止行"：深色模式下微信输入框是**半透明**的，
+    /// 聊天内容从它下面透出来，所以输入框的像素在两张截图之间会变，永远不满足
+    /// "静止行"。而只要有一行不静止，连续静止后缀就断掉 —— 实测 pair0 只报
+    /// bottom=24，真实输入框顶在 y=2346（bottom=276）。少裁的 252 行输入框残影
+    /// 被拼进长图中间，同时 252 行真实内容被挤掉，这正是"截图不全"的机制。
+    ///
+    /// 判据（三分类，每行只看两个数）：
+    ///   same  = |A[y] - B[y]|        同一屏幕位置
+    ///   shift = |A[y] - B[y-d]|      A[y] 若随内容滚动，应出现在 B 的这个位置
+    ///   CONT  same>=thr 且 shift<thr   → 滚动内容（B 的同位置变了，但它确实在 B 里）
+    ///   FIX   same<thr  且 shift>=thr  → 固定覆盖层
+    ///   AMB   两者都<thr               → 空白（空白和空白到处都一样，无法区分）
+    ///   NOIS  两者都>=thr              → 瞬时 UI（光标/高亮）或 JPEG 振铃
+    ///
+    /// 取"最后一个 CONT 行"作为内容底边：它下面是覆盖层或空白，
+    /// 裁掉空白没有视觉损失，所以两个方向都安全。
+    ///
+    /// 补充：还要处理**悬浮覆盖层**（iOS 26 设置页的搜索胶囊）。
+    /// 它固定在 y≈2394..2538，下面仍有内容在滚，所以"最后一个 CONT 行"落在
+    /// 屏幕最底部，上面那段会给出 bottom=0，胶囊就被拼进长图两次。
+    /// 这类带子的特征是 shift 一直很大（内容在 B 里任何位置都找不到），
+    /// 所以再找一段"连续 shift>=thr 且延伸到接近底边"的带，从它的上边缘裁。
+    static func classifyBottom(_ A: GrayImage, _ B: GrayImage, _ d: Int,
+                               _ thr: Float = StitchParams.classifyThr) -> Int {
+        let H = A.height
+        let W = A.width
+        let y0 = max(Int(Double(H) * (1.0 - StitchParams.maxOverlayFrac)), d, 0)
+        if y0 >= H { return 0 }
+        let rows = H - y0
+        let n = sampleCount(W, 1)
+
+        var same = [Float](repeating: 0, count: rows)
+        var shift = [Float](repeating: 0, count: rows)
+        let ad = A.data
+        let bd = B.data
+        for k in 0..<rows {
+            let y = y0 + k
+            let ra = y * W
+            let rc = (y - d) * W
+            var s: Float = 0
+            var t: Float = 0
+            for x in 0..<n {
+                let av = ad[ra + x]
+                s += abs(av - bd[ra + x])
+                t += abs(av - bd[rc + x])
+            }
+            same[k] = s / Float(n)
+            shift[k] = t / Float(n)
+        }
+
+        // 最后一个 CONT 行
+        var bClass = 0
+        var k = rows - 1
+        while k >= 0 {
+            if same[k] >= thr && shift[k] < thr {
+                bClass = H - 1 - (y0 + k)
+                break
+            }
+            k -= 1
+        }
+
+        // 悬浮固定带：连续 shift>=thr 且下端接近屏幕底部
+        let near = H - Int(StitchParams.overlayBandEndNear * Double(H))
+        var bIsland = 0
+        var runStart = -1
+        for i in 0...rows {
+            let big = i < rows && shift[i] >= thr
+            if big && runStart < 0 {
+                runStart = i
+            } else if !big && runStart >= 0 {
+                let len = i - runStart
+                let yEnd = y0 + i - 1
+                if len >= StitchParams.minOverlayH && yEnd >= near {
+                    bIsland = max(bIsland, H - (y0 + runStart))
+                }
+                runStart = -1
+            }
+        }
+        return max(bClass, bIsland)
+    }
+
+    /// 顶部覆盖层高度的对称判据：B[y] 若随内容滚动，应出现在 A[y+d]。
+    static func classifyTop(_ A: GrayImage, _ B: GrayImage, _ d: Int,
+                            _ thr: Float = StitchParams.classifyThr) -> Int {
+        let H = B.height
+        let W = B.width
+        let y1 = min(Int(Double(H) * StitchParams.maxOverlayFrac), H - d)
+        if y1 <= 0 { return 0 }
+        let n = sampleCount(W, 1)
+
+        var first = -1
+        let ad = A.data
+        let bd = B.data
+        for y in 0..<y1 {
+            let r = y * W
+            let rd = (y + d) * W
+            var s: Float = 0
+            var t: Float = 0
+            for x in 0..<n {
+                let bv = bd[r + x]
+                s += abs(bv - ad[r + x])
+                t += abs(bv - ad[rd + x])
+            }
+            let same = s / Float(n)
+            let shift = t / Float(n)
+            if same >= thr && shift < thr {
+                first = y
+                break
+            }
+        }
+        return first > 0 ? first : 0
+    }
+
+    /// 用已经求出的 d 重新量覆盖层；没有 d 的对不参与。
+    ///
+    /// 多对时取中位数（同一批截图、同一个 App，覆盖层高度是常量）。
+    /// 一对都不可用时退回 detectOverlays 的结果。
+    static func refineOverlays(_ grays: [GrayImage], _ dList: [Int?],
+                               _ top0: Int, _ bottom0: Int) -> (top: Int, bottom: Int) {
+        var tops = [Int]()
+        var bots = [Int]()
+        for i in 0..<dList.count {
+            guard let d = dList[i] else { continue }
+            let t = classifyTop(grays[i], grays[i + 1], d)
+            let b = classifyBottom(grays[i], grays[i + 1], d)
+            if t > 0 { tops.append(t) }
+            if b > 0 { bots.append(b) }
+        }
+        var top = tops.isEmpty ? top0 : medianInt(tops)
+        let bottom = bots.isEmpty ? bottom0 : medianInt(bots)
+        if top < StitchParams.minOverlayH { top = top0 }
+        return (top, bottom)
+    }
+
+    static func medianInt(_ v: [Int]) -> Int {
+        let s = v.sorted()
+        if s.isEmpty { return 0 }
+        return s[s.count / 2]
     }
 
     // MARK: - 偏移量搜索
@@ -571,14 +735,24 @@ enum Stitcher {
             let b1 = yLo + span * (k + 1) / StitchParams.bandCount
             var bestDD: Int?
             var bestC: Float?
+            var cMin: Float?
+            var cMax: Float?
             for dd in max(1, d - StitchParams.bandWin)...(d + StitchParams.bandWin) {
                 guard let c = bandCost(A, B, dd, b0, b1, sd, colStride) else { continue }
+                if cMin == nil || c < cMin! { cMin = c }
+                if cMax == nil || c > cMax! { cMax = c }
                 if bestC == nil || c < bestC! {
                     bestC = c
                     bestDD = dd
                 }
             }
-            if let b = bestDD { devs.append(b - d) }
+            guard let bd = bestDD, let bc = bestC, let cmx = cMax else { continue }
+            // 平坦带弃权：曲线几乎是平的，说明这一段内容在两张图里本来就一样
+            let spread = cmx > 1e-9 ? (cmx - (cMin ?? 0)) / cmx : 0
+            if spread < StitchParams.bandSpreadMin { continue }
+            // 代价整体很高的带，即使曲线有峰也不能算"同意"：无关两图就是这种
+            if bc > StitchParams.bandMaxCost { continue }
+            devs.append(bd - d)
         }
         var agree = 0
         for x in devs where abs(x) <= StitchParams.bandAgreeTol { agree += 1 }
@@ -637,7 +811,11 @@ enum Stitcher {
             guard let fd = fine.d else { continue }
             let votes = bandVotes(A, B, fd, top, bottom,
                                   StitchParams.coarseColStride, sdC)
-            if votes.agree < StitchParams.minBandAgree { continue }
+            // 多数判据：一致段数必须 >= 反对段数。
+            // 平坦带已弃权，devs 里剩下的都是"真的看了"的带；
+            // 只要求 agree >= 2 而不要求多数的话，2 对 3 反对也会通过。
+            if votes.agree < StitchParams.minBandAgree
+                || votes.agree < votes.devs.count - votes.agree { continue }
             // 分带投票通过：再核纹理行数量与保留比例
             guard let got = costAt(A, B, fd, top, bottom, sdA1,
                                    StitchParams.fineRowStride,
@@ -874,14 +1052,35 @@ enum Stitcher {
     static func analyze(_ images: [RGBABuffer]) -> (top: Int, bottom: Int,
                                                     offsets: [Int?], seams: [Seam]) {
         let grays = images.map { $0.grayscale() }
-        let (top, bottom) = detectOverlays(grays)
+        var (top, bottom) = detectOverlays(grays)
 
         var offsets = [Int?]()
-        var seams = [Seam]()
         for i in 0..<(grays.count - 1) {
-            let (d, c) = findOffset(grays[i], grays[i + 1], top, bottom)
+            let (d, _) = findOffset(grays[i], grays[i + 1], top, bottom)
             offsets.append(d)
-            seams.append(Seam(index: i, offset: d, cost: c))
+        }
+
+        // 第二轮：用已经求出的 d 反过来量覆盖层（classifyTop/Bottom），再重算 d。
+        // 详见 classifyBottom 的注释：底部少裁会让真实内容被挤掉。
+        let refined = refineOverlays(grays, offsets, top, bottom)
+        if refined.top != top || refined.bottom != bottom {
+            top = refined.top
+            bottom = refined.bottom
+            for i in 0..<(grays.count - 1) {
+                offsets[i] = findOffset(grays[i], grays[i + 1], top, bottom).d
+            }
+        }
+
+        var seams = [Seam]()
+        for i in 0..<offsets.count {
+            let c: Float
+            if let d = offsets[i] {
+                c = costAt(grays[i], grays[i + 1], d, top, bottom,
+                           rowSD(grays[i], 1), 1, 1)?.cost ?? 0
+            } else {
+                c = 0
+            }
+            seams.append(Seam(index: i, offset: offsets[i], cost: c))
         }
         return (top, bottom, offsets, seams)
     }
@@ -992,13 +1191,29 @@ enum Stitcher {
         var plans = [GroupPlan]()
         plans.reserveCapacity(groups.count)
         for g in groups {
-            // 组内重新量一次覆盖层（组内截图风格一致，比逐对更稳）
-            let (top, bottom) = detectOverlays(g.map { grays[$0] })
+            let sub = g.map { grays[$0] }
+            var (top, bottom) = detectOverlays(sub)
             var offsets = [Int?]()
             var costs = [Float]()
             for k in 0..<(g.count - 1) {
                 offsets.append(pairOffsets[g[k]])
                 costs.append(pairCost[g[k]])
+            }
+
+            // 第二轮：用已经求出的 d 反过来量覆盖层（classifyTop/Bottom），再重算 d。
+            // 这一步才是修"截图不全"的关键：底部少裁 252 行会让 252 行真实内容被挤掉。
+            // 第一轮那个估计在深色半透明覆盖层下往往偏小（bottom 24 而非 276），
+            // 但 d 本身对它不敏感 —— 实测真实 5 对在任何 (top,bottom) 组合下
+            // d 都恒定 1048/1341/1109/778。
+            let refined = refineOverlays(sub, offsets, top, bottom)
+            if refined.top != top || refined.bottom != bottom {
+                top = refined.top
+                bottom = refined.bottom
+                for k in 0..<(g.count - 1) {
+                    let (d, c) = findOffset(grays[g[k]], grays[g[k + 1]], top, bottom)
+                    offsets[k] = d
+                    costs[k] = c
+                }
             }
             plans.append(GroupPlan(indices: g, top: top, bottom: bottom,
                                    offsets: offsets, costs: costs))

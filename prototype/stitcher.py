@@ -59,6 +59,20 @@ SD_FLOOR = 8.0            # 归一化时分母下限，避免纯色行把误差�
 MATCH_COST_THRESHOLD = 0.65  # 归一化误差上限（辅助闸门）；实测正确偏移 0.00~0.56，无关两图 0.44~1.58
 PEAK_RATIO_THRESHOLD = 0.45  # 主闸门：最优代价 / 搜索区间中位代价；实测真匹配 0.00~0.25，无关两图 0.49~0.89
 MIN_USED_FRAC = 0.25      # 排除动态区段后，至少还要剩这么多纹理行参与打分（防"排除作弊"）
+# 分带投票的"弃权"阈值。某一带在 d±BAND_WIN 内的代价曲线如果几乎是平的，
+# 说明这一段内容在两张图里本来就一样（空白背景、重复的输入框），
+# 它的 argmin 纯属噪声，不该投票反对。
+# 实测（diag_real23.py）：真匹配的有信息带 spread > 0.3，平坦带 < 0.12；
+# 而无关两图的**每一个**带 spread 都 < 0.05 —— 所以平坦带弃权后，
+# 无关两图会得到 agree=0，真匹配仍能拿到 agree>=2，分离度反而更大。
+BAND_SPREAD_MIN = 0.05
+# 投"同意"票的带，它自己的最小代价必须低于这个值。
+# 实测（calib_bandcost.py）：
+#   真匹配 的同意带 min cost 全部 <= 0.90（亚像素/视频最差 0.66，真实微信 0.63）
+#   无关两图 的带 min cost 全部 >= 2.04
+# 平坦带弃权只能挡掉"没有信息"的带，挡不住"两图都同样花"的无关图 ——
+# 后者代价曲线有峰但整体很高，所以必须再补这条绝对上限。
+BAND_MAX_COST = 1.0
 BAD_ROW_COST = 0.60       # 单行归一化误差 >= 它才算"这行被遮挡了"
 BAD_BAND_MIN = 48         # 连续不匹配多少像素才算"被遮挡区段"
 BAD_BAND_ITER = 3         # 迭代排除次数上限
@@ -73,7 +87,11 @@ COARSE_COL_STRIDE = 4     # 粗搜每 4 列取 1 列
 BAND_COUNT = 4            # 切成几段
 BAND_WIN = 8              # 每段在自己那一段内搜索 d±8
 BAND_AGREE_TOL = 1        # 偏差 <= 1px 就算"指向同一个 d"
-MIN_BAND_AGREE = 3        # 至少几段一致才认定为真匹配（4 段中 3 段）
+# 至少几段一致才认定为真匹配。
+# 注意：平坦带弃权后，真匹配常常只剩 2 个"有信息"的带（其余是空白背景、
+# 重复的输入框），所以这里必须是 2，再配一条"一致段数 >= 反对段数"的多数
+# 判据（见 find_offset）。实测无关两图 agree 恒为 0，仍有充足分离度。
+MIN_BAND_AGREE = 2
 CAND_TOPK = 8             # 粗搜取前几个候选逐个精修+投票（防"低重叠区噪声"骗过）
 STATIC_EPS = 1.5          # 已废弃：旧的"行内平均差"判据，保留常量以免别处引用报错
 CHANGE_EPS = 2.0          # 灰度差 >= 它才算"这个像素真的变了"
@@ -81,6 +99,17 @@ STATIC_CHANGED_FRAC = 0.10  # 一行里允许变动的像素占比上限
                             # （状态栏时钟只占 ~2%，仍算静止行）
 MAX_OVERLAY_FRAC = 0.22   # 单侧覆盖层高度上限（占屏高）
 MIN_OVERLAY_H = 60        # 紧贴边缘的覆盖层最小高度
+# 三分类判据里"行均值差 >= 它才算变了"的阈值。
+# 实测（calib_top1.py）：真实微信 JPEG 用 6.0 得到 top=318/bottom=270（真值 318/276）；
+# 合成 PNG 用 6.0 也精确命中（top=321、bottom 与 content_bottom_bar 一致）。
+CLASSIFY_THR = 6.0
+# 悬浮覆盖层（不贴底边、下面还露出滚动内容）的"固定带"判据。
+# iOS 26 设置页的搜索胶囊就固定在 y≈2394..2538，下面仍有内容在滚。
+# 这类带子里内容**不会在任何位置重现**，所以 shift = |A[y]-B[y-d]| 一直很大；
+# 而正常滚动内容总有某个 d 让 shift 很小。实测（calib_bottom12.py）：
+#   真实 6 图 bottom = 270/270/270/228（真值 276/276/276/228）
+#   合成 5 场景 chat 200 / feed 180 / list 34 / article 34 / dynamic 34 全精确
+OVERLAY_BAND_END_NEAR = 0.12  # 固定带必须延伸到"距底边 12% 屏高"以内才算底部覆盖层
 # iOS 小白条（home indicator）固定在屏幕绝对位置、但不紧贴底边，
 # 它下面那几行是屏幕背景色（同样静止），整段一起裁掉即可。
 HOME_ISLAND_ZONE = 0.10   # 只在屏幕最下方 10% 内找
@@ -169,6 +198,97 @@ def detect_overlays(grays):
 
     if top + bottom > int(0.5 * H):
         return 0, 0
+    return top, bottom
+
+
+def classify_bottom(A, B, d, thr=CLASSIFY_THR):
+    """用已知的滚动量 d 判定底部覆盖层高度（真机唯一可靠的判据）。
+
+    为什么不能用"跨截图静止行"：深色模式下微信输入框是**半透明**的，
+    聊天内容从它下面透出来，所以输入框的像素在两张截图之间会变，永远不满足
+    "静止行"。而只要有一行不静止，连续静止后缀就断掉 —— 实测 pair0 只报
+    bottom=24，真实输入框顶在 y=2346（bottom=276）。少裁的 252 行输入框残影
+    被拼进长图中间，同时 252 行真实内容被挤掉，这正是"截图不全"的机制。
+
+    判据（三分类，每行只看两个数）：
+      same  = |A[y] - B[y]|        同一屏幕位置
+      shift = |A[y] - B[y-d]|      A[y] 若随内容滚动，应出现在 B 的这个位置
+      CONT  same>=thr 且 shift<thr   → 滚动内容（B 的同位置变了，但它确实在 B 里）
+      FIX   same<thr  且 shift>=thr  → 固定覆盖层
+      AMB   两者都<thr               → 空白（空白和空白到处都一样，无法区分）
+      NOIS  两者都>=thr              → 瞬时 UI（光标/高亮）或 JPEG 振铃
+
+    取"最后一个 CONT 行"作为内容底边：它下面是覆盖层或空白，
+    裁掉空白没有视觉损失，所以两个方向都安全。
+
+    补充：还要处理**悬浮覆盖层**（iOS 26 设置页的搜索胶囊）。
+    它固定在 y≈2394..2538，下面仍有内容在滚，所以"最后一个 CONT 行"落在
+    屏幕最底部，classify 会给出 bottom=0，胶囊就被拼进长图两次。
+    这类带子的特征是 shift 一直很大（内容在 B 里任何位置都找不到），
+    所以再找一段"连续 shift>=thr 且延伸到接近底边"的带，从它的上边缘裁。
+    """
+    H = A.shape[0]
+    y0 = max(int(H * (1.0 - MAX_OVERLAY_FRAC)), d, 0)
+    if y0 >= H:
+        return 0
+    ys = np.arange(y0, H)
+    same = np.abs(A[ys] - B[ys]).mean(axis=1)
+    shift = np.abs(A[ys] - B[ys - d]).mean(axis=1)
+    cont = (same >= thr) & (shift < thr)
+    idx = np.nonzero(cont)[0]
+    b_class = H - 1 - int(ys[idx[-1]]) if len(idx) else 0
+
+    # 悬浮固定带：连续 shift>=thr 且下端接近屏幕底部
+    near = H - int(OVERLAY_BAND_END_NEAR * H)
+    b_isl = 0
+    run_start = None
+    for k in range(len(shift) + 1):
+        big = k < len(shift) and shift[k] >= thr
+        if big and run_start is None:
+            run_start = k
+        elif not big and run_start is not None:
+            if k - run_start >= MIN_OVERLAY_H and int(ys[k - 1]) >= near:
+                b_isl = max(b_isl, H - int(ys[run_start]))
+            run_start = None
+    return max(b_class, b_isl)
+
+
+def classify_top(A, B, d, thr=CLASSIFY_THR):
+    """顶部覆盖层高度的对称判据：B[y] 若随内容滚动，应出现在 A[y+d]。"""
+    H = B.shape[0]
+    y1 = min(int(H * MAX_OVERLAY_FRAC), H - d)
+    if y1 <= 0:
+        return 0
+    ys = np.arange(0, y1)
+    same = np.abs(B[ys] - A[ys]).mean(axis=1)
+    shift = np.abs(B[ys] - A[ys + d]).mean(axis=1)
+    cont = (same >= thr) & (shift < thr)
+    idx = np.nonzero(cont)[0]
+    if len(idx) == 0:
+        return 0
+    return int(ys[idx[0]])
+
+
+def refine_overlays(grays, d_list, top0, bottom0):
+    """用已经求出的 d 重新量覆盖层；没有 d 的对不参与。
+
+    多对时取中位数（同一批截图、同一个 App，覆盖层高度是常量）。
+    一对都不可用时退回 detect_overlays 的结果。
+    """
+    tops, bots = [], []
+    for i, d in enumerate(d_list):
+        if d is None:
+            continue
+        t = classify_top(grays[i], grays[i + 1], d)
+        b = classify_bottom(grays[i], grays[i + 1], d)
+        if t > 0:
+            tops.append(t)
+        if b > 0:
+            bots.append(b)
+    top = int(np.median(tops)) if tops else top0
+    bottom = int(np.median(bots)) if bots else bottom0
+    if top < MIN_OVERLAY_H:
+        top = top0
     return top, bottom
 
 
@@ -360,6 +480,11 @@ def band_votes(A, B, d, top, bottom, col_stride=None):
       - 分带投票：真匹配最少 3/4 段一致，无关两图最多 2/4，4/5/6 段均稳定分离
     道理很直观：真匹配时上下每一段都指向同一个滚动量；无关两图即使全局
     argmin 恰好落在某个 d，各段也会各指一处。
+
+    返回 (agree, devs)。**代价曲线太平坦的带算"弃权"，不记入 devs**，
+    理由见 BAND_SPREAD_MIN 的注释：那种带的 argmin 是噪声，投反对票会让
+    本来正确的偏移掉到 MIN_BAND_AGREE 以下，整组被误判成断开
+    （真机 6 张被拆成 3 组、每张长图只有 2 张内容的根因就是这个）。
     """
     H = A.shape[0]
     if col_stride is None:
@@ -379,14 +504,25 @@ def band_votes(A, B, d, top, bottom, col_stride=None):
         b0 = y_lo + span * k // BAND_COUNT
         b1 = y_lo + span * (k + 1) // BAND_COUNT
         best_dd, best_c = None, None
+        cs = []
         for dd in range(max(1, d - BAND_WIN), d + BAND_WIN + 1):
             c = _band_cost(A, B, dd, b0, b1, sdA, col_stride)
             if c is None:
                 continue
+            cs.append(c)
             if best_c is None or c < best_c:
                 best_c, best_dd = c, dd
-        if best_dd is not None:
-            devs.append(best_dd - d)
+        if best_dd is None or not cs:
+            continue
+        cmax = max(cs)
+        spread = (cmax - min(cs)) / cmax if cmax > 1e-9 else 0.0
+        if spread < BAND_SPREAD_MIN:      # 平坦带弃权
+            continue
+        # 代价整体很高的带，即使曲线有峰也不能算"同意"：无关两图就是这种
+        # 情况（曲线有起伏但 min 都在 2.0 以上）。
+        if best_c > BAND_MAX_COST:
+            continue
+        devs.append(best_dd - d)
     agree = sum(1 for x in devs if abs(x) <= BAND_AGREE_TOL)
     return agree, devs
 
@@ -435,8 +571,11 @@ def find_offset(A, B, top, bottom):
             BAD_BAND_MIN, MAX_EXCLUDED_FRAC)
         if f_d is None:
             continue
-        agree, _ = band_votes(A, B, f_d, top, bottom)
-        if agree < MIN_BAND_AGREE:
+        agree, devs = band_votes(A, B, f_d, top, bottom)
+        # 多数判据：一致段数必须 >= 反对段数。
+        # 平坦带已弃权，devs 里剩下的都是"真的看了"的带；
+        # 只要求 agree >= 2 而不要求多数的话，2 对 3 反对也会通过。
+        if agree < MIN_BAND_AGREE or agree < len(devs) - agree:
             continue
         # 分带投票通过：再核纹理行数量与保留比例
         got = _cost_at(A, B, f_d, top, bottom, sdA1,
@@ -513,10 +652,29 @@ def stitch_group(rgbs, verbose=False, keep_first_chrome=True):
 
     top, bottom = detect_overlays(grays)
 
-    d_list, pairs = [], []
-    for i in range(n - 1):
-        d, c = find_offset(grays[i], grays[i + 1], top, bottom)
-        d_list.append(d)
+    # 第一轮：先用"跨截图静止行"给出的覆盖层估个 d。
+    # 这个估计在深色半透明覆盖层下往往偏小（bottom 24 而非 276），
+    # 但 d 本身对它不敏感 —— 实测真实 5 对在任何 (top,bottom) 组合下
+    # d 都恒定 1048/1341/1109/778。
+    d_list = [find_offset(grays[i], grays[i + 1], top, bottom)[0]
+              for i in range(n - 1)]
+
+    # 第二轮：用 d 反过来量覆盖层（classify_top/bottom），再重算一遍 d。
+    # 这一步才是修"截图不全"的关键：底部少裁 252 行会让 252 行真实内容被挤掉。
+    top2, bottom2 = refine_overlays(grays, d_list, top, bottom)
+    if (top2, bottom2) != (top, bottom):
+        top, bottom = top2, bottom2
+        d_list = [find_offset(grays[i], grays[i + 1], top, bottom)[0]
+                  for i in range(n - 1)]
+
+    pairs = []
+    for i, d in enumerate(d_list):
+        c = 0.0
+        if d is not None:
+            got = _cost_at(grays[i], grays[i + 1], d, top, bottom,
+                           _row_sd(grays[i], 1), 1, 1)
+            if got is not None:
+                c = got[0]
         pairs.append({"index": i, "d": d, "cost": round(c, 4), "gap": d is None})
         if verbose:
             print(f"  [pair{i}] d={d} cost={c:.4f} gap={d is None}")
