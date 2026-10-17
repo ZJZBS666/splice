@@ -15,6 +15,8 @@ enum StitchParams {
     static let minScrollFrac = 0.20
     static let matchFracThreshold: Float = 0.55
     static let exactEps: Float = 0.5
+    /// 真实截图偶尔有 1~2 的抗锯齿/降噪差异，严格 eps 匹配不上时用这个放宽值重搜。
+    static let tolerantEps: Float = 3.0
     static let minMatchRows = 30
     static let maxExcludedFrac: Float = 0.90
     static let staticEps: Float = 1.5
@@ -194,6 +196,8 @@ enum Stitcher {
 
     /// frac = 有效行里"整行完全匹配"的比例；ys/errs 供后续找遮挡区段用。
     ///
+    /// - Parameter eps: 单行视为"匹配"的最大允许误差。默认 0.5（逐像素完全相同）。
+    ///   真实截图偶尔有 1~2 的渲染差异，这时会用放宽的 eps 再搜一次。
     /// - Parameter pruneBelow: 当"剩下所有行全部匹配"也已经追不上这个 frac 时立刻中止。
     ///   这是纯剪枝，不改变最优解，但让搜索快一到两个数量级。
     static func matchFraction(_ A: GrayImage,
@@ -202,6 +206,7 @@ enum Stitcher {
                               _ top: Int,
                               _ bottom: Int,
                               _ exclude: [Bool]?,
+                              eps: Float = StitchParams.exactEps,
                               pruneBelow: Float = -1) -> MatchStats {
         let H = A.height
         let W = A.width
@@ -242,7 +247,7 @@ enum Stitcher {
                         var mx: Float = 0
                         vDSP_maxv(sp, 1, &mx, N)
                         errs[k] = mx
-                        if mx < StitchParams.exactEps { hits += 1 }
+                        if mx < eps { hits += 1 }
 
                         if pruneBelow >= 0 {
                             let potential = Float(hits + (n - k - 1)) * invN
@@ -262,9 +267,10 @@ enum Stitcher {
     }
 
     /// 从逐行误差里找出连续 >= minLen 行、且完全不匹配的区段，返回 [(y0, y1)]。
-    static func badBands(_ errs: [Float], _ ys: [Int], _ minLen: Int) -> [(Int, Int)] {
+    static func badBands(_ errs: [Float], _ ys: [Int], _ minLen: Int,
+                         eps: Float = StitchParams.exactEps) -> [(Int, Int)] {
         var idx = [Int]()
-        for (k, e) in errs.enumerated() where e >= StitchParams.exactEps {
+        for (k, e) in errs.enumerated() where e >= eps {
             idx.append(k)
         }
         if idx.isEmpty { return [] }
@@ -292,7 +298,8 @@ enum Stitcher {
                                 _ lo: Int,
                                 _ hi: Int,
                                 _ badMin: Int,
-                                _ maxExcludedFrac: Float) -> (d: Int?, frac: Float) {
+                                _ maxExcludedFrac: Float,
+                                eps: Float = StitchParams.exactEps) -> (d: Int?, frac: Float) {
         let H = A.height
         var exclude = [Bool](repeating: false, count: H)
         var bestD: Int?
@@ -302,7 +309,8 @@ enum Stitcher {
             var candD: Int?
             var candF: Float = -1
             for d in lo...hi {
-                let f = matchFraction(A, B, d, top, bottom, exclude, pruneBelow: candF).frac
+                let f = matchFraction(A, B, d, top, bottom, exclude,
+                                      eps: eps, pruneBelow: candF).frac
                 if f > candF {
                     candF = f
                     candD = d
@@ -317,9 +325,9 @@ enum Stitcher {
             bestD = cd
             bestF = candF
 
-            let stats = matchFraction(A, B, cd, top, bottom, exclude)
+            let stats = matchFraction(A, B, cd, top, bottom, exclude, eps: eps)
             if stats.errs.isEmpty { break }
-            let bands = badBands(stats.errs, stats.ys, badMin)
+            let bands = badBands(stats.errs, stats.ys, badMin, eps: eps)
             if bands.isEmpty { break }
             var newExcl = exclude
             for (y0, y1) in bands {
@@ -340,12 +348,28 @@ enum Stitcher {
     }
 
     /// A、B 同尺寸灰度图。返回 (d, frac)；d == nil 表示没找到可靠重叠。
+    ///
+    /// 先用严格 eps 搜（合成样本能做到逐像素完全相同）；严格版判定失败时，
+    /// 再放宽到 tolerantEps 搜一次。真机截图偶尔会有 1~2 的抗锯齿/降噪差异，
+    /// 严格版会把整组判成"无重叠"，导致明明能拼的截图被硬拼。
     static func findOffset(_ A: GrayImage, _ B: GrayImage, _ top: Int, _ bottom: Int) -> (d: Int?, frac: Float) {
+        if let strict = findOffset(A, B, top, bottom, eps: StitchParams.exactEps) {
+            return strict
+        }
+        if let loose = findOffset(A, B, top, bottom, eps: StitchParams.tolerantEps) {
+            return loose
+        }
+        return (nil, 0)
+    }
+
+    private static func findOffset(_ A: GrayImage, _ B: GrayImage,
+                                   _ top: Int, _ bottom: Int,
+                                   eps: Float) -> (d: Int?, frac: Float)? {
         let H = A.height
         let minOverlap = max(24, Int(StitchParams.minOverlapFrac * Double(H)))
 
         func dLimit() -> Int { H - bottom - minOverlap - top }
-        if dLimit() <= 2 { return (nil, 0) }
+        if dLimit() <= 2 { return nil }
 
         // ---- 第 1 轮：降采样粗搜
         let s = StitchParams.coarseScale
@@ -357,10 +381,10 @@ enum Stitcher {
         let minOvS = max(6, minOverlap / s)
         let dsHi = Hs - bots - minOvS - tops
         let dsLo = max(1, Int(StitchParams.minScrollFrac * Double(Hs - tops - bots)) / 2)
-        if dsHi <= dsLo { return (nil, 0) }
+        if dsHi <= dsLo { return nil }
         let coarse = exclusionSearch(As, Bs, tops, bots, dsLo, dsHi,
-                                     max(3, StitchParams.badBandMin / s), 0.6)
-        guard let bestDs = coarse.d else { return (nil, 0) }
+                                     max(3, StitchParams.badBandMin / s), 0.6, eps: eps)
+        guard let bestDs = coarse.d else { return nil }
 
         // ---- 第 2 轮：全分辨率精修
         var lo = max(1, bestDs * s - StitchParams.fineWindow * 2)
@@ -369,16 +393,17 @@ enum Stitcher {
         let minScroll = max(Int(StitchParams.minScrollFrac * Double(H - top - bottom)),
                             StitchParams.fineWindow)
         lo = max(lo, minScroll)
-        if lo > hi { return (nil, 0) }
+        if lo > hi { return nil }
 
-        let fine = exclusionSearch(A, B, top, bottom, lo, hi, StitchParams.badBandMin, 0.6)
-        guard let bestD = fine.d else { return (nil, 0) }
+        let fine = exclusionSearch(A, B, top, bottom, lo, hi,
+                                   StitchParams.badBandMin, 0.6, eps: eps)
+        guard let bestD = fine.d else { return nil }
 
         // 双闸门：既要"匹配行占比够高"，也要"真的匹配上足够多行"。
-        let stats = matchFraction(A, B, bestD, top, bottom, nil)
-        let matchRows = stats.errs.filter { $0 < StitchParams.exactEps }.count
+        let stats = matchFraction(A, B, bestD, top, bottom, nil, eps: eps)
+        let matchRows = stats.errs.filter { $0 < eps }.count
         if fine.frac < StitchParams.matchFracThreshold || matchRows < StitchParams.minMatchRows {
-            return (nil, fine.frac)
+            return nil
         }
         return (bestD, fine.frac)
     }
