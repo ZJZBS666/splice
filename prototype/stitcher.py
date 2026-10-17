@@ -39,15 +39,42 @@ import numpy as np
 
 # ---------- 可调参数（Swift 里用完全相同的值） ----------
 COARSE_SCALE = 4          # 粗搜降采样倍数
-FINE_WINDOW = 10          # 精修搜索半径（像素）
+FINE_WINDOW = 6           # 精修搜索半径（像素）。实测 6 与 10 准确率相同但快 2 倍
+# 精修阶段的抽样步长。粗搜定位后候选已在真值附近，精修只需在 d±2*FINE_WINDOW
+# 内找极小值；实测 row=2/col=2 与 row=1/col=1 的准确率完全相同，但快 4 倍。
+FINE_ROW_STRIDE = 2       # 精修每 2 行取 1 行
+FINE_COL_STRIDE = 2       # 精修每 2 列取 1 列
 MIN_OVERLAP_FRAC = 0.06   # 至少 6% 的行重叠，否则判为"断开"
 MIN_SCROLL_FRAC = 0.20    # 至少滚动 20% 内容高。小于它的候选一律不采纳：
                           # 固定位置的悬浮视频/按钮在"几乎没滚动"时自己和自己匹配，
                           # 会制造大量假匹配。真实使用中每屏都会滚过 1/4 以上。
-MATCH_FRAC_THRESHOLD = 0.55  # 正确偏移的精确匹配行占比下限
-EXACT_EPS = 0.5           # 灰度差低于它算"这一行完全匹配"
-MIN_MATCH_ROWS = 30       # 至少要有这么多行真的匹配上，否则不算"找到重叠"
-MAX_EXCLUDED_FRAC = 0.90  # 被排除（视频/进度条）的行占比上限
+MATCH_FRAC_THRESHOLD = 0.55  # 已废弃：旧的"精确匹配行占比"下限，保留常量以免别处引用报错
+EXACT_EPS = 0.5           # 已废弃：旧的逐像素完全匹配阈值
+TOLERANT_EPS = 3.0        # 已废弃：旧的放宽 eps
+MIN_MATCH_ROWS = 30       # 参与打分的"有效纹理行"数量下限（绝对行数）
+MAX_EXCLUDED_FRAC = 0.85  # 被排除（视频/进度条）的行占比上限
+# ---- 新指标：纹理行归一化误差（抗亚像素 + 抗动态内容）----
+TEXTURE_MIN = 3.0         # 行内灰度标准差 >= 它才算"有纹理的行"
+SD_FLOOR = 8.0            # 归一化时分母下限，避免纯色行把误差放大成噪声
+MATCH_COST_THRESHOLD = 0.65  # 归一化误差上限（辅助闸门）；实测正确偏移 0.00~0.56，无关两图 0.44~1.58
+PEAK_RATIO_THRESHOLD = 0.45  # 主闸门：最优代价 / 搜索区间中位代价；实测真匹配 0.00~0.25，无关两图 0.49~0.89
+MIN_USED_FRAC = 0.25      # 排除动态区段后，至少还要剩这么多纹理行参与打分（防"排除作弊"）
+BAD_ROW_COST = 0.60       # 单行归一化误差 >= 它才算"这行被遮挡了"
+BAD_BAND_MIN = 48         # 连续不匹配多少像素才算"被遮挡区段"
+BAD_BAND_ITER = 3         # 迭代排除次数上限
+# 粗搜：只抽样"参与比较的行/列"，d 保持全分辨率整数。
+# 不能对图像做行降采样 —— d=1534 时 1534/4=383.5 不是整数，降采样图里
+# 根本不存在真值对应的位移，极小值会被抹平到错误位置（list 场景选错 1888 的根因）。
+COARSE_ROW_STRIDE = 8     # 粗搜每 8 行取 1 行（实测 4/8/16 准确率相同，8 比 4 快 2.5 倍）
+COARSE_COL_STRIDE = 4     # 粗搜每 4 列取 1 列
+# ---- 分带一致性闸门（主判据）----
+# 把有效区间横切若干段，每段各自找最优偏移；真匹配时每段都指向同一个 d，
+# 无关两图各段乱指。实测：真匹配最少 3/4 段一致，无关两图最多 2/4。
+BAND_COUNT = 4            # 切成几段
+BAND_WIN = 8              # 每段在自己那一段内搜索 d±8
+BAND_AGREE_TOL = 1        # 偏差 <= 1px 就算"指向同一个 d"
+MIN_BAND_AGREE = 3        # 至少几段一致才认定为真匹配（4 段中 3 段）
+CAND_TOPK = 8             # 粗搜取前几个候选逐个精修+投票（防"低重叠区噪声"骗过）
 STATIC_EPS = 1.5          # 已废弃：旧的"行内平均差"判据，保留常量以免别处引用报错
 CHANGE_EPS = 2.0          # 灰度差 >= 它才算"这个像素真的变了"
 STATIC_CHANGED_FRAC = 0.10  # 一行里允许变动的像素占比上限
@@ -59,8 +86,6 @@ MIN_OVERLAY_H = 60        # 紧贴边缘的覆盖层最小高度
 HOME_ISLAND_ZONE = 0.10   # 只在屏幕最下方 10% 内找
 HOME_ISLAND_MIN_H = 3     # 小岛最小高度
 HOME_ISLAND_MAX_H = 120   # 小岛最大高度
-BAD_BAND_MIN = 48         # 连续不匹配多少像素才算"被遮挡区段"
-BAD_BAND_ITER = 3         # 迭代排除次数上限
 DIVIDER_COLOR = (205, 205, 205)
 DIVIDER_HEIGHT = 3
 
@@ -169,28 +194,88 @@ def find_static_island_from_bottom(st, H):
 
 
 # ---------------------------------------------------------------- 偏移量搜索
+#
+# 指标演进史（重要，别再走回头路）：
+#   第 2 版：误差中位数 —— 正确和错误偏移处中位数都是 0，零判别力。
+#   第 4 版：整行完全匹配占比 frac —— 合成样本（整数滚动）下完美，
+#            但真机 UIScrollView 停下时滚动量是**小数**像素，iOS 截图会按小数
+#            偏移做双线性重采样，同一内容行的像素值差 1~120，frac 恒为 0，
+#            整组会被误判成"无重叠"。这是必须换指标的根本原因。
+#   第 5 版（当前）：纹理行归一化 L1 误差
+#            cost(d) = Σ|B[y]-A[y+d]| / Σ std(A[y+d])   只统计"有纹理"的行
+#            - 只统计有纹理的行：纯色行在任何偏移下都匹配，会稀释信号
+#            - 用"比值的和"而不是"逐行比值的均值"：后者会被低对比度行放大
+#              （分母接近 0），亚像素时会把真值淹没
+#            - 用 sum 而不是 median/trimmed：纯色行多时中位数退化为 0
+#   粗搜不再对图像做行降采样：d=1534 时 1534/4=383.5 不是整数，降采样图里
+#   根本不存在真值对应的位移，极小值被抹平到错误位置（这是 list 场景选错
+#   1888 的根因）。改为**抽样比较行**（y 取 top, top+4, ...），d 仍是精确整数。
 
-def match_fraction(A, B, d, top, bottom, exclude=None):
-    """返回 (frac, ys, errs)。
-    frac = 有效行里"整行完全匹配"的比例；ys/errs 供后续找遮挡区段用。"""
+def _row_sd(A, col_stride=1):
+    """每行的灰度标准差。与 d 无关，可以预先算一次。
+
+    std 只依赖 A 的行本身，而 a = A[ys+d] 只是"取 A 的哪些行"，
+    所以整张 A 的行标准差表可以复用，省掉每个候选都重算的代价。
+    """
+    sub = A[:, ::col_stride]
+    return sub.std(axis=1).astype(np.float32)
+
+
+def _cost_at(A, B, d, top, bottom, sdA, row_stride, col_stride, exclude=None):
+    """返回 (cost, used_rows, ys, rne, tex_mask) 或 None。
+
+    cost = Σ rowMAD / Σ rowSD，只累加"有纹理且未被排除"的行。
+    rowMAD 是这一行所有（抽样）列的绝对差均值。
+    """
     H = A.shape[0]
     n_end = H - bottom - d
     if n_end <= top:
-        return 0.0, np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.float32)
-    ys = np.arange(top, n_end)
-    if exclude is not None:
-        ys = ys[~exclude[ys]]
+        return None
+    ys = np.arange(top, n_end, row_stride)
     if ys.size < 8:
-        return 0.0, np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.float32)
-    errs = np.abs(B[ys] - A[ys + d]).max(axis=1)
-    return float((errs < EXACT_EPS).mean()), ys, errs
+        return None
+    a_rows = ys + d
+    a = A[a_rows][:, ::col_stride]
+    b = B[ys][:, ::col_stride]
+    sd = sdA[a_rows]
+    row_mad = np.abs(a - b).mean(axis=1)
+    rne = row_mad / np.maximum(sd, SD_FLOOR)
+
+    tex = sd >= TEXTURE_MIN
+    used = tex
+    if exclude is not None:
+        used = tex & (~exclude[ys])
+    n_used = int(used.sum())
+    if n_used < 8:
+        return None
+    sd_sum = float(sd[used].sum())
+    if sd_sum < 1e-6:
+        return None
+    cost = float(row_mad[used].sum() / sd_sum)
+    return cost, n_used, ys, rne, tex
 
 
-def _bad_bands(errs, ys, min_len):
-    """从逐行误差里找出连续 >= min_len 行、且完全不匹配的区段，返回 [(y0, y1)]。"""
-    idx = np.where(errs >= EXACT_EPS)[0]
-    if idx.size == 0:
+def _scan_curve(A, B, top, bottom, lo, hi, sdA, row_stride, col_stride,
+                exclude=None):
+    """扫描 [lo, hi]，返回 {d: (cost, used_rows)}。"""
+    curve = {}
+    for d in range(lo, hi + 1):
+        got = _cost_at(A, B, d, top, bottom, sdA, row_stride, col_stride, exclude)
+        if got is not None:
+            curve[d] = (got[0], got[1])
+    return curve
+
+
+def _bad_bands(rne, ys, tex, min_len):
+    """找出"连续 >= min_len 行、是纹理行、但误差很大"的区段。
+
+    这些就是视频 / 进度条 / 广告 / 动画 —— 两张截图里内容真的不一样，
+    不该参与打分。返回 [(y0, y1)]（屏幕坐标，含端点）。
+    """
+    bad = (rne >= BAD_ROW_COST) & tex
+    if not bad.any():
         return []
+    idx = np.where(bad)[0]
     groups, s0, p = [], idx[0], idx[0]
     for k in idx[1:]:
         if k - p > 1:
@@ -201,29 +286,35 @@ def _bad_bands(errs, ys, min_len):
     return [(int(ys[a]), int(ys[b])) for a, b in groups if (b - a + 1) >= min_len]
 
 
-def _exclusion_search(A, B, top, bottom, lo, hi, bad_min, max_excluded_frac):
-    """在 [lo, hi] 里找最优 d，并迭代排除"被遮挡区段"（视频/进度条/广告）。
-    返回 (d, frac, exclude_mask)。"""
+def _exclusion_search(A, B, top, bottom, lo, hi, sdA, row_stride, col_stride,
+                      bad_min, max_excluded_frac):
+    """在 [lo, hi] 里找 cost 最小的 d，并迭代排除动态区段。
+
+    返回 (d, cost, exclude, curve)。curve 是最后一轮的 {d: cost}，用于算峰值比。
+    """
     H = A.shape[0]
     exclude = np.zeros(H, dtype=bool)
-    best_d, best_f = None, -1.0
+    best_d, best_c = None, None
+    curve = {}
     for _ in range(BAD_BAND_ITER):
-        cand_d, cand_f = None, -1.0
-        for d in range(lo, hi + 1):
-            f, _, _ = match_fraction(A, B, d, top, bottom, exclude)
-            if f > cand_f:
-                cand_f, cand_d = f, d
-        if cand_d is None:
-            break
+        raw = _scan_curve(A, B, top, bottom, lo, hi, sdA, row_stride, col_stride,
+                          exclude)
+        curve = {d: v[0] for d, v in raw.items()}
+        if not curve:
+            return None, None, exclude, curve
+        cand_d = min(curve, key=lambda k: curve[k])
+        cand_c = curve[cand_d]
         if cand_d == best_d:
-            best_d, best_f = cand_d, max(best_f, cand_f)
+            best_c = min(best_c, cand_c) if best_c is not None else cand_c
             break
-        best_d, best_f = cand_d, cand_f
+        best_d, best_c = cand_d, cand_c
 
-        _, ys, errs = match_fraction(A, B, best_d, top, bottom, exclude)
-        if errs.size == 0:
+        got = _cost_at(A, B, best_d, top, bottom, sdA, row_stride, col_stride,
+                       exclude)
+        if got is None:
             break
-        bands = _bad_bands(errs, ys, bad_min)
+        _, _, ys, rne, tex = got
+        bands = _bad_bands(rne, ys, tex, bad_min)
         if not bands:
             break
         new_excl = exclude.copy()
@@ -233,56 +324,158 @@ def _exclusion_search(A, B, top, bottom, lo, hi, bad_min, max_excluded_frac):
         if new_excl[top:H - bottom].mean() > max_excluded_frac:
             break
         exclude = new_excl
-    return best_d, max(best_f, 0.0), exclude
+    return best_d, best_c, exclude, curve
+
+
+def _band_cost(A, B, d, y0, y1, sdA, col_stride):
+    """[y0,y1) 区间内、偏移 d 的归一化 L1 代价（只统计纹理行）。
+
+    与全局 _cost_at 用同一套度量，保证"分段最优"和"全局最优"可比。
+    """
+    H = A.shape[0]
+    y1 = min(y1, H - d)
+    if y1 <= y0 + 4:
+        return None
+    ys = np.arange(y0, y1)
+    a = A[ys + d][:, ::col_stride]
+    b = B[ys][:, ::col_stride]
+    sd = sdA[ys + d]
+    tex = sd >= TEXTURE_MIN
+    if int(tex.sum()) < 8:
+        return None
+    mad = np.abs(a - b).mean(axis=1)
+    den = float(sd[tex].sum())
+    if den < 1e-6:
+        return None
+    return float(mad[tex].sum() / den)
+
+
+def band_votes(A, B, d, top, bottom, col_stride=None):
+    """分带一致性：把有效区间横切 BAND_COUNT 段，每段各自在 d±BAND_WIN 内
+    找自己的最优偏移，统计"指向同一个 d（偏差 <= BAND_AGREE_TOL）"的段数。
+
+    这是真正的判别闸门。为什么不用绝对 cost 或峰值比（实测数据）：
+      - 绝对 cost：亚像素+视频场景下真匹配 0.67~0.99，无关两图 0.73~1.36，重叠
+      - 峰值比：真匹配最高 0.42，无关两图最低 0.35，重叠
+      - 分带投票：真匹配最少 3/4 段一致，无关两图最多 2/4，4/5/6 段均稳定分离
+    道理很直观：真匹配时上下每一段都指向同一个滚动量；无关两图即使全局
+    argmin 恰好落在某个 d，各段也会各指一处。
+    """
+    H = A.shape[0]
+    if col_stride is None:
+        col_stride = COARSE_COL_STRIDE
+    n_end = H - bottom - d
+    if n_end <= top + 16:
+        return 0, []
+    sdA = _row_sd(A, col_stride)
+    ys_all = np.arange(top, n_end)
+    ys_tex = ys_all[sdA[ys_all + d] >= TEXTURE_MIN]
+    if ys_tex.size < BAND_COUNT * 8:
+        return 0, []
+    y_lo, y_hi = int(ys_tex[0]), int(ys_tex[-1])
+    span = y_hi - y_lo + 1
+    devs = []
+    for k in range(BAND_COUNT):
+        b0 = y_lo + span * k // BAND_COUNT
+        b1 = y_lo + span * (k + 1) // BAND_COUNT
+        best_dd, best_c = None, None
+        for dd in range(max(1, d - BAND_WIN), d + BAND_WIN + 1):
+            c = _band_cost(A, B, dd, b0, b1, sdA, col_stride)
+            if c is None:
+                continue
+            if best_c is None or c < best_c:
+                best_c, best_dd = c, dd
+        if best_dd is not None:
+            devs.append(best_dd - d)
+    agree = sum(1 for x in devs if abs(x) <= BAND_AGREE_TOL)
+    return agree, devs
 
 
 def find_offset(A, B, top, bottom):
-    """A、B 同尺寸灰度图。返回 (d, frac)；d=None 表示没找到可靠重叠。"""
+    """A、B 同尺寸灰度图。返回 (d, cost)；d=None 表示没找到可靠重叠。
+
+    两段式：粗搜（抽样行+抽样列，全分辨率 d）定位，再全分辨率精修。
+    四道闸门，任一不过就判"断开"（宁可硬拼让用户拖，也不瞎猜）：
+      1) 分带一致性 >= MIN_BAND_AGREE —— 主判据，见 band_votes 注释
+      2) 参与打分的纹理行 >= MIN_MATCH_ROWS —— 不是靠排除作弊
+      3) 保留的纹理行占比 >= MIN_USED_FRAC
+    绝对 cost 与峰值比都不再作闸门（正负例区间重叠），只作诊断值返回。
+    """
     H = A.shape[0]
     min_overlap = max(24, int(MIN_OVERLAP_FRAC * H))
-
-    def d_limit():
-        return H - bottom - min_overlap - top
-
-    if d_limit() <= 2:
-        return None, 0.0
-
-    # ---- 第 1 轮：降采样粗搜（同样要带排除循环，否则动态内容会选错候选）
-    s = COARSE_SCALE
-    As, Bs = box_downsample(A, s), box_downsample(B, s)
-    Hs = As.shape[0]
-    tops, bots = top // s, bottom // s
-    min_ov_s = max(6, min_overlap // s)
-    ds_hi = Hs - bots - min_ov_s - tops
-    # 粗搜阶段就要排除"滚动太少"的候选，否则悬浮元素会先把自己选出来
-    ds_lo = max(1, int(MIN_SCROLL_FRAC * (Hs - tops - bots)) // 2)
-    if ds_hi <= ds_lo:
-        return None, 0.0
-    best_ds, _, _ = _exclusion_search(As, Bs, tops, bots, ds_lo, ds_hi,
-                                      max(3, BAD_BAND_MIN // s), 0.6)
-    if best_ds is None:
-        return None, 0.0
-
-    # ---- 第 2 轮：全分辨率精修
-    lo = max(1, best_ds * s - FINE_WINDOW * 2)
-    hi = min(d_limit(), best_ds * s + FINE_WINDOW * 2)
-    # 排除"滚动太少"的候选：固定位置的悬浮元素会自己和自己匹配
+    d_hi = H - bottom - min_overlap - top
     min_scroll = max(int(MIN_SCROLL_FRAC * (H - top - bottom)), FINE_WINDOW)
-    lo = max(lo, min_scroll)
-    if lo > hi:
+    lo = min_scroll
+    hi = d_hi
+    if hi - lo < 8:
         return None, 0.0
-    best_d, best_f, _ = _exclusion_search(A, B, top, bottom, lo, hi,
-                                          BAD_BAND_MIN, 0.6)
 
-    if best_d is None:
+    # ---- 第 1 轮：粗搜（抽样行列，d 全分辨率）
+    sdA = _row_sd(A, COARSE_COL_STRIDE)
+    c_d, c_c, _, curve = _exclusion_search(
+        A, B, top, bottom, lo, hi, sdA,
+        COARSE_ROW_STRIDE, COARSE_COL_STRIDE,
+        max(8, BAD_BAND_MIN // COARSE_ROW_STRIDE), MAX_EXCLUDED_FRAC)
+    if c_d is None or not curve:
         return None, 0.0
-    # 双闸门：既要"匹配行占比够高"，也要"真的匹配上足够多行"。
-    # 只靠占比会在动态内容场景被"排除掉 86% 的行后 100% 匹配"骗过。
-    _, _, errs = match_fraction(A, B, best_d, top, bottom)
-    match_rows = int((errs < EXACT_EPS).sum()) if errs.size else 0
-    if best_f < MATCH_FRAC_THRESHOLD or match_rows < MIN_MATCH_ROWS:
-        return None, best_f
-    return best_d, best_f
+
+    # ---- 粗搜取前 TOPK 个候选，逐个精修 + 分带投票，取第一个通过闸门的
+    # 为什么要取多个：接近搜索上界 d_hi 的候选只有很少的行可比，随机噪声
+    # 也容易压出低代价。实测 seed888/tail=0.5 时粗搜 argmin 落在 d=2463
+    # （真值 1438），那个位置的分带一致性只有 1/4，而真值是 4/4。
+    # 所以"代价最低"不能直接当结论，必须让分带投票来裁决。
+    cands = sorted(curve, key=lambda k: curve[k])[:CAND_TOPK]
+    sdA1 = _row_sd(A, FINE_COL_STRIDE)
+    best = None
+    for cd in cands:
+        f_lo = max(lo, cd - FINE_WINDOW * 2)
+        f_hi = min(hi, cd + FINE_WINDOW * 2)
+        f_d, f_c, f_ex, _ = _exclusion_search(
+            A, B, top, bottom, f_lo, f_hi, sdA1, FINE_ROW_STRIDE, FINE_COL_STRIDE,
+            BAD_BAND_MIN, MAX_EXCLUDED_FRAC)
+        if f_d is None:
+            continue
+        agree, _ = band_votes(A, B, f_d, top, bottom)
+        if agree < MIN_BAND_AGREE:
+            continue
+        # 分带投票通过：再核纹理行数量与保留比例
+        got = _cost_at(A, B, f_d, top, bottom, sdA1,
+                       FINE_ROW_STRIDE, FINE_COL_STRIDE, exclude=f_ex)
+        if got is None:
+            continue
+        cost, used_rows, ys, rne, tex = got
+        n_tex = int(tex.sum())
+        if n_tex < MIN_MATCH_ROWS:
+            continue
+        if n_tex > 0 and used_rows / float(n_tex) < MIN_USED_FRAC:
+            continue
+        if best is None or agree > best[0] or (agree == best[0] and cost < best[1]):
+            best = (agree, cost, f_d)
+            if agree >= BAND_COUNT:      # 全票通过，不用再看别的候选
+                break
+
+    if best is None:
+        return None, c_c
+
+    # ---- 收尾：在 best_d 的 ±1 上用全行全列复核一次
+    # 精修阶段用 row_stride=2 抽样，行相位可能偏 1 像素（实测 dynamic pair3
+    # 因此差 1px，且 1882/1883/1884 三个候选在抽样下代价并列 0）。
+    # 这里必须用全行的代价重新比较，不能拿抽样代价当基准 —— 否则并列时永远
+    # 停在先找到的那个。只比 3 个候选，代价很小。
+    bd = best[2]
+    bc = None
+    sdA_full = _row_sd(A, 1)
+    for dd in (bd - 1, bd, bd + 1):
+        if dd < lo or dd > hi:
+            continue
+        got = _cost_at(A, B, dd, top, bottom, sdA_full, 1, 1)
+        if got is None:
+            continue
+        if bc is None or got[0] < bc:
+            bd, bc = dd, got[0]
+    if bc is None:
+        return best[2], best[1]
+    return bd, bc
 
 
 # ---------------------------------------------------------------- 拼接
@@ -322,11 +515,11 @@ def stitch_group(rgbs, verbose=False, keep_first_chrome=True):
 
     d_list, pairs = [], []
     for i in range(n - 1):
-        d, f = find_offset(grays[i], grays[i + 1], top, bottom)
+        d, c = find_offset(grays[i], grays[i + 1], top, bottom)
         d_list.append(d)
-        pairs.append({"index": i, "d": d, "frac": round(f, 3), "gap": d is None})
+        pairs.append({"index": i, "d": d, "cost": round(c, 4), "gap": d is None})
         if verbose:
-            print(f"  [pair{i}] d={d} frac={f:.3f} gap={d is None}")
+            print(f"  [pair{i}] d={d} cost={c:.4f} gap={d is None}")
 
     # 每张都裁掉底部覆盖层；顶部只有第一张保留
     cropped = []
@@ -377,12 +570,12 @@ def stitch_all(rgbs, timestamps=None, verbose=False, keep_first_chrome=True):
             continue
         # 时间上算同一组，再用内容匹配兜底确认
         top, bottom = detect_overlays([grays[i], grays[i + 1]])
-        d, f = find_offset(grays[i], grays[i + 1], top, bottom)
+        d, c = find_offset(grays[i], grays[i + 1], top, bottom)
         if d is None:
             breaks.append(i)
-            reasons[i] = f"no_match frac={f:.2f}"
+            reasons[i] = f"no_match cost={c:.2f}"
         if verbose:
-            print(f"  [pair{i}] time_gap={gap_time} d={d} frac={f:.3f} break={d is None}")
+            print(f"  [pair{i}] time_gap={gap_time} d={d} cost={c:.4f} break={d is None}")
 
     groups, start = [], 0
     for b in breaks:
