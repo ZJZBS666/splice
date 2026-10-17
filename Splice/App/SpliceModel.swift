@@ -169,6 +169,11 @@ final class SpliceModel: ObservableObject {
         if buffers.contains(where: { $0.width != minW }) {
             buffers = buffers.map { $0.croppedToWidth(minW) }
         }
+        // 裁剪后再存一份给「拖动接缝重拼」用。顺序不能反：
+        // 先存的话 loadedImages 里是未裁剪的原图，宽度和拼接结果不一致，
+        // 拖接缝重拼出来的长图会错位。
+        loadedImages = [:]
+        for (i, b) in buffers.enumerated() { loadedImages[i] = b }
 
         statusText = "正在识别重叠部分…"
         progress = 0.7
