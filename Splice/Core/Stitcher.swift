@@ -592,7 +592,7 @@ enum Stitcher {
             let y0 = (i == 0 && keepFirstChrome) ? 0 : top
             cropped.append(img.cropped(top: y0, bottom: bottom))
         }
-        let contentH = (grays?.first.height ?? images[0].height) - top - bottom
+        let contentH = (grays?.first?.height ?? images[0].height) - top - bottom
         let chromeH = keepFirstChrome ? top : 0
 
         var cuts: [Int] = []
