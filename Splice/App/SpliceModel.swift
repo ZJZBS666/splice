@@ -181,16 +181,19 @@ final class SpliceModel: ObservableObject {
         let ts = items.map { $0.creationDate.timeIntervalSince1970 }
         let keep = keepFirstChrome
         let bufs = buffers
-        let groups = await Task.detached(priority: .userInitiated) {
-            Stitcher.stitchAll(bufs, timestamps: ts, keepFirstChrome: keep)
+        // 拼接和生成预览都放后台：预览要把 100MB+ 的长图缩小，
+        // 在主线程做会让转圈动画卡住。
+        let made = await Task.detached(priority: .userInitiated) { () -> [(StitchResult, PreviewBox)] in
+            Stitcher.stitchAll(bufs, timestamps: ts, keepFirstChrome: keep).map {
+                ($0, PreviewBox(image: SpliceModel.makePreview($0.image)))
+            }
         }.value
 
         progress = 0.95
         var vms: [ResultVM] = []
-        for g in groups {
-            let preview = SpliceModel.makePreview(g.image)
+        for (g, box) in made {
             vms.append(ResultVM(indices: g.indices,
-                                preview: preview,
+                                preview: box.image,
                                 fullImage: g.image,
                                 seams: g.seams,
                                 cuts: g.cuts,
