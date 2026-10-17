@@ -67,6 +67,16 @@ enum StitchParams {
 
     static let minMatchRows = 30
     static let maxExcludedFrac: Float = 0.85
+
+    // ---- 右侧滚动条保护带 ----
+    /// iOS 的滚动指示条固定在屏幕最右侧（1206 宽下实测在 x=1188..1196，
+    /// 距右边缘 10~18 像素），半透明、随滚动移动。
+    /// 它既不是"静止行"（每张截图位置都不同），也不是内容，参与打分会引入噪声，
+    /// 而且会被原样拼进长图，导致一张长图里出现好几条滚动条。
+    /// 所以在**所有打分与覆盖层判定**里都跳过右侧这一窄条。
+    /// 只损失约 3% 的列，信号几乎不受影响。
+    static let scrollbarGuardFrac = 0.03
+
     static let staticEps: Float = 1.5
     /// 判定"像素真的变了"的阈值
     static let changeEps: Float = 2.0
@@ -170,8 +180,10 @@ enum Stitcher {
         var isStatic = [Bool](repeating: true, count: H)
         // 一行里最多允许多少个像素不同
         let maxChanged = max(1, Int(StitchParams.staticChangedFrac * Double(W)))
+        // 滚动条那几列每张截图位置都不同，必须排除，否则整条底边都被判成"变了"
+        let uw = usableWidth(W)
         var scratch = [Float](repeating: 0, count: W)
-        let N = vDSP_Length(W)
+        let N = vDSP_Length(uw)
         let eps = StitchParams.changeEps
 
         for (i, j) in pairs {
@@ -187,7 +199,7 @@ enum Stitcher {
                             vDSP_vabs(sp, 1, sp, 1, N)
                             // 数一数有多少个像素真的变了；超过上限就提前判否
                             var changed = 0
-                            for x in 0..<W {
+                            for x in 0..<uw {
                                 if sp[x] >= eps {
                                     changed += 1
                                     if changed > maxChanged {
@@ -288,7 +300,7 @@ enum Stitcher {
         let y0 = max(Int(Double(H) * (1.0 - StitchParams.maxOverlayFrac)), d, 0)
         if y0 >= H { return 0 }
         let rows = H - y0
-        let n = sampleCount(W, 1)
+        let n = usableWidth(W)
 
         var same = [Float](repeating: 0, count: rows)
         var shift = [Float](repeating: 0, count: rows)
@@ -347,7 +359,7 @@ enum Stitcher {
         let W = B.width
         let y1 = min(Int(Double(H) * StitchParams.maxOverlayFrac), H - d)
         if y1 <= 0 { return 0 }
-        let n = sampleCount(W, 1)
+        let n = usableWidth(W)
 
         var first = -1
         let ad = A.data
@@ -423,6 +435,14 @@ enum Stitcher {
         return (W - 1) / s + 1
     }
 
+    /// 参与打分的列数：去掉最右侧的滚动条保护带。
+    /// 见 `StitchParams.scrollbarGuardFrac` 的说明。
+    @inline(__always)
+    static func usableWidth(_ W: Int) -> Int {
+        let cut = max(1, Int(StitchParams.scrollbarGuardFrac * Double(W)))
+        return max(1, W - cut)
+    }
+
     /// 每行的灰度标准差。与 d 无关，可以预先算一次。
     ///
     /// std 只依赖 A 的行本身，而 a = A[ys+d] 只是"取 A 的哪些行"，
@@ -436,7 +456,7 @@ enum Stitcher {
         let H = A.height
         var out = [Float](repeating: 0, count: H)
         let cs = max(1, colStride)
-        let n = sampleCount(W, cs)
+        let n = sampleCount(usableWidth(A.width), cs)
         if n < 1 { return out }
         let invN = 1.0 / Float(n)
         A.data.withUnsafeBufferPointer { a in
@@ -500,7 +520,7 @@ enum Stitcher {
         if ys.count < 8 { return nil }
 
         let n = ys.count
-        let nc = sampleCount(W, colStride)
+        let nc = sampleCount(usableWidth(W), colStride)
         if nc < 1 { return nil }
 
         var rne: [Float] = wantDetail ? [Float](repeating: 0, count: n) : []
@@ -664,7 +684,7 @@ enum Stitcher {
         let W = A.width
         let y1 = min(y1In, H - d)
         if y1 <= y0 + 4 { return nil }
-        let nc = sampleCount(W, colStride)
+        let nc = sampleCount(usableWidth(W), colStride)
         if nc < 1 { return nil }
         var texCount = 0
         var sdSum: Float = 0
@@ -866,6 +886,10 @@ enum Stitcher {
     /// 只要在这个范围内，换手处两边像素完全一样，所以拖动切点不会破坏画面。
     /// 总高度恒为 S[m-1] + contentH，与切点无关。
     static func starts(_ offsets: [Int]) -> [Int] {
+        // 必须显式处理空数组：`for i in 1...0` 会触发
+        // "Fatal error: Range requires lowerBound <= upperBound" 直接闪退。
+        // 单张截图自成一组时 offsets 就是空的（0 对相邻截图）。
+        if offsets.isEmpty { return [0] }
         var S = [Int](repeating: 0, count: offsets.count + 1)
         for i in 1...offsets.count { S[i] = S[i - 1] + offsets[i - 1] }
         return S
@@ -1218,7 +1242,11 @@ enum Stitcher {
             plans.append(GroupPlan(indices: g, top: top, bottom: bottom,
                                    offsets: offsets, costs: costs))
         }
-        return plans
+        // 只保留真正能拼的组（至少 2 张）。
+        // 单张的组是"这一对没找到重叠"的副产物：它的长图就是原截图本身，
+        // 没有任何拼接价值，显示出来只会让用户以为拼错了。
+        // 顺便这也避开了 `starts([])` 这条曾经直接闪退的路径。
+        return plans.filter { $0.indices.count >= 2 }
     }
 
     /// 把一串截图自动分成若干组，每组拼一张长图。

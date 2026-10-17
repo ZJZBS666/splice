@@ -117,6 +117,12 @@ HOME_ISLAND_MIN_H = 3     # 小岛最小高度
 HOME_ISLAND_MAX_H = 120   # 小岛最大高度
 DIVIDER_COLOR = (205, 205, 205)
 DIVIDER_HEIGHT = 3
+# 右侧滚动条保护带：iOS 滚动指示条固定在屏幕最右侧（1206 宽下实测 x=1188..1196，
+# 距右边缘 10~18 像素），半透明、随滚动移动。它既不是"静止行"（每张位置都不同），
+# 也不是内容，参与打分会引入噪声，而且会被原样拼进长图 —— 一张长图里出现好几条
+# 滚动条就是这个原因。所以在**所有打分与覆盖层判定**里都跳过右侧这一窄条。
+# 只损失约 3% 的列，信号几乎不受影响。
+SCROLLBAR_GUARD_FRAC = 0.03
 
 
 # ---------------------------------------------------------------- 基础工具
@@ -125,6 +131,12 @@ def to_gray(rgb):
     """rgb: (H,W,3) uint8 -> (H,W) float32"""
     rgb = rgb.astype(np.float32)
     return rgb[:, :, 0] * 0.299 + rgb[:, :, 1] * 0.587 + rgb[:, :, 2] * 0.114
+
+
+def usable_w(W):
+    """参与打分的列数：去掉最右侧的滚动条保护带（见 SCROLLBAR_GUARD_FRAC）。"""
+    cut = max(1, int(SCROLLBAR_GUARD_FRAC * W))
+    return max(1, W - cut)
 
 
 def box_downsample(g, scale):
@@ -154,12 +166,13 @@ def static_rows(grays):
     """
     H = grays[0].shape[0]
     W = grays[0].shape[1]
+    UW = usable_w(W)
     max_changed = max(1, int(STATIC_CHANGED_FRAC * W))
     st = np.ones(H, dtype=bool)
     n = len(grays)
     for i in range(n):
         for j in range(i + 1, n):
-            changed = (np.abs(grays[i] - grays[j]) >= CHANGE_EPS).sum(axis=1)
+            changed = (np.abs(grays[i][:, :UW] - grays[j][:, :UW]) >= CHANGE_EPS).sum(axis=1)
             st &= changed <= max_changed
     return st
 
@@ -228,12 +241,13 @@ def classify_bottom(A, B, d, thr=CLASSIFY_THR):
     所以再找一段"连续 shift>=thr 且延伸到接近底边"的带，从它的上边缘裁。
     """
     H = A.shape[0]
+    UW = usable_w(A.shape[1])
     y0 = max(int(H * (1.0 - MAX_OVERLAY_FRAC)), d, 0)
     if y0 >= H:
         return 0
     ys = np.arange(y0, H)
-    same = np.abs(A[ys] - B[ys]).mean(axis=1)
-    shift = np.abs(A[ys] - B[ys - d]).mean(axis=1)
+    same = np.abs(A[ys][:, :UW] - B[ys][:, :UW]).mean(axis=1)
+    shift = np.abs(A[ys][:, :UW] - B[ys - d][:, :UW]).mean(axis=1)
     cont = (same >= thr) & (shift < thr)
     idx = np.nonzero(cont)[0]
     b_class = H - 1 - int(ys[idx[-1]]) if len(idx) else 0
@@ -256,12 +270,13 @@ def classify_bottom(A, B, d, thr=CLASSIFY_THR):
 def classify_top(A, B, d, thr=CLASSIFY_THR):
     """顶部覆盖层高度的对称判据：B[y] 若随内容滚动，应出现在 A[y+d]。"""
     H = B.shape[0]
+    UW = usable_w(B.shape[1])
     y1 = min(int(H * MAX_OVERLAY_FRAC), H - d)
     if y1 <= 0:
         return 0
     ys = np.arange(0, y1)
-    same = np.abs(B[ys] - A[ys]).mean(axis=1)
-    shift = np.abs(B[ys] - A[ys + d]).mean(axis=1)
+    same = np.abs(B[ys][:, :UW] - A[ys][:, :UW]).mean(axis=1)
+    shift = np.abs(B[ys][:, :UW] - A[ys + d][:, :UW]).mean(axis=1)
     cont = (same >= thr) & (shift < thr)
     idx = np.nonzero(cont)[0]
     if len(idx) == 0:
@@ -337,7 +352,7 @@ def _row_sd(A, col_stride=1):
     std 只依赖 A 的行本身，而 a = A[ys+d] 只是"取 A 的哪些行"，
     所以整张 A 的行标准差表可以复用，省掉每个候选都重算的代价。
     """
-    sub = A[:, ::col_stride]
+    sub = A[:, :usable_w(A.shape[1])][:, ::col_stride]
     return sub.std(axis=1).astype(np.float32)
 
 
@@ -348,6 +363,7 @@ def _cost_at(A, B, d, top, bottom, sdA, row_stride, col_stride, exclude=None):
     rowMAD 是这一行所有（抽样）列的绝对差均值。
     """
     H = A.shape[0]
+    UW = usable_w(A.shape[1])
     n_end = H - bottom - d
     if n_end <= top:
         return None
@@ -355,8 +371,8 @@ def _cost_at(A, B, d, top, bottom, sdA, row_stride, col_stride, exclude=None):
     if ys.size < 8:
         return None
     a_rows = ys + d
-    a = A[a_rows][:, ::col_stride]
-    b = B[ys][:, ::col_stride]
+    a = A[a_rows][:, :UW][:, ::col_stride]
+    b = B[ys][:, :UW][:, ::col_stride]
     sd = sdA[a_rows]
     row_mad = np.abs(a - b).mean(axis=1)
     rne = row_mad / np.maximum(sd, SD_FLOOR)
@@ -453,12 +469,13 @@ def _band_cost(A, B, d, y0, y1, sdA, col_stride):
     与全局 _cost_at 用同一套度量，保证"分段最优"和"全局最优"可比。
     """
     H = A.shape[0]
+    UW = usable_w(A.shape[1])
     y1 = min(y1, H - d)
     if y1 <= y0 + 4:
         return None
     ys = np.arange(y0, y1)
-    a = A[ys + d][:, ::col_stride]
-    b = B[ys][:, ::col_stride]
+    a = A[ys + d][:, :UW][:, ::col_stride]
+    b = B[ys][:, :UW][:, ::col_stride]
     sd = sdA[ys + d]
     tex = sd >= TEXTURE_MIN
     if int(tex.sum()) < 8:
@@ -743,6 +760,10 @@ def stitch_all(rgbs, timestamps=None, verbose=False, keep_first_chrome=True):
 
     results = []
     for g in groups:
+        # 单张的组是"这一对没找到重叠"的副产物：它的长图就是原截图本身，
+        # 没有任何拼接价值。Swift 侧同样过滤（analyzeAll 的 plans.filter）。
+        if len(g) < 2:
+            continue
         sub = [rgbs[i] for i in g]
         img, diag = stitch_group(sub, verbose=False, keep_first_chrome=keep_first_chrome)
         diag["indices"] = g
