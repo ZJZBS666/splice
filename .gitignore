@@ -20,6 +20,7 @@ prototype/samples/
 prototype/out/
 prototype/*.png
 _artifact/
+_dl/
 
 # Python
 __pycache__/

@@ -223,7 +223,9 @@ final class SpliceModel: ObservableObject {
             progress = Double(i + 1) / Double(results.count) * 0.7
         }
 
-        if deleteOriginals {
+        // 只有在全部长图都成功存进相册后才删原图。
+        // 少存一张就删原图，等于把用户的内容弄丢了两份 —— 宁可留着。
+        if deleteOriginals && savedCount == results.count {
             statusText = "正在把原图移到「最近删除」…"
             // 只删真正参与拼接的那些原图（results 里的 indices 指向 sourceItems）
             var used = Set<Int>()
@@ -242,8 +244,11 @@ final class SpliceModel: ObservableObject {
 
         progress = 1
         if let msg = failedMsg {
-            phase = .failed(msg)
-            statusText = msg
+            let keep = (deleteOriginals && savedCount != results.count)
+                ? "\n有长图没保存成功，所以原图都保留着，没有删除。"
+                : ""
+            phase = .failed(msg + keep)
+            statusText = msg + keep
         } else {
             phase = .saved
             statusText = deleteOriginals
