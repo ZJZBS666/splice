@@ -952,7 +952,12 @@ enum Stitcher {
                        bottom: Int,
                        chromeH: Int) -> RGBABuffer {
         let W = images[0].width
-        var totalH = 0
+        // 最后一张被裁掉的底部覆盖层要补回来。
+        // 中间几张的这一段内容由下一张的顶部覆盖，但最后一张之后没有下一张，
+        // 不补就永久丢失（用户报的「4 最下面的一截被截掉」）。
+        let lastImage = images[images.count - 1]
+        let tailRows = max(0, min(bottom, lastImage.height))
+        var totalH = tailRows
         for s in segments {
             totalH += ((s.imageIndex == 0) ? chromeH : 0) + s.rowCount
         }
@@ -993,6 +998,17 @@ enum Stitcher {
                 let base = hasChrome ? chromeH : top
                 copyRows(src, from: base + s.startRow, rows: s.rowCount)
             }
+
+            // 收尾：补回最后一张的底部覆盖层。这里要绕开 maxRow 的限制，
+            // 直接读原图最后 tailRows 行。
+            if tailRows > 0 {
+                lastImage.pixels.withUnsafeBufferPointer { sp in
+                    memcpy(dp + cursor * rowBytes,
+                           sp.baseAddress! + (lastImage.height - tailRows) * rowBytes,
+                           tailRows * rowBytes)
+                }
+                cursor += tailRows
+            }
         }
         return out.cropped(top: 0, bottom: max(0, out.height - cursor))
     }
@@ -1009,7 +1025,10 @@ enum Stitcher {
         // 第 0 张：保留 chrome 时从第 0 行起，否则从内容区顶端 top 起；都止于 H-bottom
         let firstStart = chromeH > 0 ? 0 : top
         let firstRows = max(0, images[0].height - bottom - firstStart)
-        var totalH = firstRows
+        // 最后一张被裁掉的底部覆盖层要补回来，理由见 render(_:segments:top:bottom:chromeH:)
+        let lastImage = images[images.count - 1]
+        let tailRows = max(0, min(bottom, lastImage.height))
+        var totalH = firstRows + tailRows
         for (i, d) in offsets.enumerated() {
             if let d = d {
                 totalH += d
@@ -1063,6 +1082,16 @@ enum Stitcher {
                     divider()
                     append(src, from: top, rows: contentHeight)
                 }
+            }
+
+            // 收尾：补回最后一张的底部覆盖层（绕开 maxRow，直接读原图最后 tailRows 行）
+            if tailRows > 0 {
+                lastImage.pixels.withUnsafeBufferPointer { sp in
+                    memcpy(dp + cursor * rowBytes,
+                           sp.baseAddress! + (lastImage.height - tailRows) * rowBytes,
+                           tailRows * rowBytes)
+                }
+                cursor += tailRows
             }
         }
         return out.cropped(top: 0, bottom: max(0, out.height - cursor))

@@ -5,9 +5,11 @@
     截图 B 是 A 向下滚动 delta 像素后的样子，故  B[y] == A[y + delta]
     所以算法求出的 d 就等于 delta，拼接时新内容为 B[HC-d : HC]，高度正好 d。
 
-保留第一张顶部覆盖层（keep_first_chrome=True，用户要求）时：
-    总高 = (H - bottom) + sum(deltas)
-    out[0 : top] 是第一张的状态栏+导航栏，out[top:] 是纯内容
+保留第一张顶部覆盖层（keep_first_chrome=True）时：
+    总高 = H + sum(deltas)
+    因为 = (H - bottom) + sum(deltas) + bottom
+    最后那个 bottom 是"最后一张被裁掉的底部覆盖层"，它后面没有下一张能补，必须原样补回。
+    out[0 : top] 是第一张的状态栏+导航栏，out[top:] 是纯内容，out 末尾 bottom 行是最后一张的底部。
 """
 import os
 import numpy as np
@@ -56,7 +58,8 @@ def main():
                     ok_all = False
                 print(f"  pair{i}: 实测 {p['d']:4d}  真值 {exp_d:4d}  误差 {err:3d}px  {flag}")
 
-        exp_total = (H - exp_bottom) + sum(exp_deltas)
+        # 总高 = (H - bottom) + sum(deltas) + bottom（补回最后一张的底部覆盖层）= H + sum(deltas)
+        exp_total = H + sum(exp_deltas)
         err_h = abs(out.shape[0] - exp_total)
         if err_h > 12:
             ok_all = False

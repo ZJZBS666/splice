@@ -636,11 +636,17 @@ def find_offset(A, B, top, bottom):
 
 # ---------------------------------------------------------------- 拼接
 
-def assemble(cropped_rgbs, d_list, content_h=None, first_kept_chrome=False, first_top=0):
+def assemble(cropped_rgbs, d_list, content_h=None, first_kept_chrome=False, first_top=0,
+             last_tail=None):
     """按给定的 d 序列拼装。d=None 表示断开（加分隔线）。
 
     cropped_rgbs[0] 在 first_kept_chrome=True 时比别人多出 first_top 行（保留的状态栏+导航栏），
     所以"新内容"的高度基准要用 content_h（不含顶部覆盖层的内容区高度），不能用 cropped_rgbs[0] 的行数。
+
+    last_tail：最后一张截图被裁掉的底部覆盖层那一段（原图 [H-bottom:H]）。
+    为什么需要它：每张图的内容区只到 H-bottom，后面那些行在中间几张里还能由下一张图
+    补上（下一张的顶部正好覆盖到这段），但**最后一张之后没有下一张**，不补就永久丢失
+    —— 用户反馈「4 最下面的一截被截掉了」就是这个。
     """
     W = cropped_rgbs[0].shape[1]
     if content_h is None:
@@ -653,6 +659,8 @@ def assemble(cropped_rgbs, d_list, content_h=None, first_kept_chrome=False, firs
             parts.append(cropped_rgbs[i + 1])
         else:
             parts.append(cropped_rgbs[i + 1][content_h - d:])
+    if last_tail is not None and last_tail.shape[0] > 0:
+        parts.append(last_tail)
     return np.concatenate(parts, axis=0)
 
 
@@ -701,8 +709,15 @@ def stitch_group(rgbs, verbose=False, keep_first_chrome=True):
     for i, r in enumerate(rgbs):
         y0 = 0 if (i == 0 and keep_first_chrome) else top
         cropped.append(r[y0:H - bottom])
+
+    # 最后一张被裁掉的底部那一段要补回来。
+    # 中间几张的这段内容由下一张的顶部覆盖，但最后一张之后没有下一张，
+    # 不补就永久丢失（用户报的「4 最下面的一截被截掉」）。
+    # 注意 bottom=0 时 last_tail 为空，天然不影响其它场景。
+    last_tail = rgbs[-1][H - bottom:H] if bottom > 0 else None
+
     out = assemble(cropped, d_list, first_kept_chrome=(keep_first_chrome and top > 0),
-                   first_top=top)
+                   first_top=top, last_tail=last_tail)
     diag = {"top": int(top), "bottom": int(bottom),
             "content_h": int(H - top - bottom),
             "pairs": pairs, "d_list": d_list,

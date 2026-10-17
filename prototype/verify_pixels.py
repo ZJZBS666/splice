@@ -2,8 +2,10 @@
 """逐像素验证：拼接结果应当和"真值内容图"完全一致。
 
 保留第一张状态栏+导航栏后：
-    out[0 : top]  = 第一张原图的 [0 : top]
-    out[top : ]   = 内容坐标 [top : top + (out高 - top)]
+    out[0 : top]          = 第一张原图的 [0 : top]
+    out[top : h-bottom]   = 内容坐标 [top : top + (h - bottom - top)]
+    out[h-bottom : h]     = 最后一张原图被裁掉的底部覆盖层 [H-bottom : H]
+                            （最后一张之后没有下一张能补这段，必须原样补回）
 """
 import os
 import numpy as np
@@ -39,14 +41,26 @@ def main():
         out = np.asarray(Image.open(os.path.join(HERE, f"out_{name}.png")).convert("RGB"))
         content = cache[(gen_samples.SCENARIOS[name]["content"], gen_samples.stable_seed(name))]
 
-        top = stitcher.detect_overlays(
-            [stitcher.to_gray(np.asarray(Image.open(p).convert("RGB"))) for p in info["shots"]])[0]
+        grays = [stitcher.to_gray(np.asarray(Image.open(p).convert("RGB"))) for p in info["shots"]]
+        top = stitcher.detect_overlays(grays)[0]
+        bottom = info["content_bottom_bar"]
 
-        # 重建期望图：第一张原图整张（含状态栏/导航栏）+ 内容 [top : top+rest]
-        first = np.asarray(Image.open(info["shots"][0]).convert("RGB"))
-        rest_h = out.shape[0] - top
-        expect = np.concatenate([first[:top], content[top:top + rest_h]], axis=0)
+        h = out.shape[0]
+        body_h = h - bottom
+        if bottom > 0:
+            # 重建期望：第一张原图顶部覆盖层 + 内容 + 最后一张的底部覆盖层
+            first = np.asarray(Image.open(info["shots"][0]).convert("RGB"))
+            last = np.asarray(Image.open(info["shots"][-1]).convert("RGB"))
+            rest_h = body_h - top
+            expect = np.concatenate([first[:top],
+                                     content[top:top + rest_h],
+                                     last[last.shape[0] - bottom:]], axis=0)
+        else:
+            first = np.asarray(Image.open(info["shots"][0]).convert("RGB"))
+            rest_h = body_h - top
+            expect = np.concatenate([first[:top], content[top:top + rest_h]], axis=0)
 
+        assert expect.shape[0] == out.shape[0], (name, expect.shape, out.shape)
         d = np.abs(out.astype(np.int32) - expect.astype(np.int32))
 
         video_band = None

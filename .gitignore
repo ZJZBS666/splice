@@ -29,6 +29,8 @@ __pycache__/
 .venv/
 # 调试脚本（用完即弃，不入库）
 prototype/dbg*.py
+# 图标候选预览图（本地挑选用，不入库）
+icons_preview/
 
 # 编辑器
 .vscode/

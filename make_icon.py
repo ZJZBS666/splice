@@ -1,41 +1,59 @@
-"""生成 Splice 的 App 图标（1024x1024 PNG）。
+"""生成 Splice 的正式 App 图标（1024x1024 PNG）。
 
-设计：极简白底 + 一条竖直的黑色长图，中间两处白色接缝横线微微出头，
-像"两段拼在一起"的痕迹。符合 App 的极简白底风格。
+设计（用户从 12 个候选里选定的 A 方案）：
+  极简白底 + 一条竖直的黑色圆角长图，长图里画几行灰色文字横线，
+  中间两条白色接缝横线 —— 直接表达"几张截图拼成一张长图"。
+
+选 A 而不是用深色底方案的理由：用户在 Windows 上看到的就是白底效果，
+在浅色壁纸的主屏上白底图标更干净；且"长图 + 内容行"最直白地说明用途。
 """
 import os
 from PIL import Image, ImageDraw
 
 SIZE = 1024
 SS = 4  # 超采样倍数，画完再缩小，边缘才平滑
+S = SIZE * SS
 
-
-def rounded(d, box, r, fill):
-    d.rounded_rectangle(box, radius=r, fill=fill)
+BG = (255, 255, 255)
+INK = (10, 10, 10)
+INK_SOFT = (58, 58, 60)
 
 
 def main():
-    S = SIZE * SS
-    img = Image.new("RGB", (S, S), (255, 255, 255))
+    img = Image.new("RGB", (S, S), BG)
     d = ImageDraw.Draw(img)
 
     # 长图本体：竖直黑色圆角矩形
-    col_w = int(0.3125 * S)          # 320/1024
-    col_h = int(0.6094 * S)          # 624/1024
-    x0 = (S - col_w) // 2
-    y0 = (S - col_h) // 2
-    x1 = x0 + col_w
-    y1 = y0 + col_h
-    rounded(d, [x0, y0, x1, y1], int(0.039 * S), (10, 10, 10))
+    w = int(0.300 * S)
+    h = int(0.640 * S)
+    x0 = (S - w) // 2
+    y0 = (S - h) // 2
+    x1, y1 = x0 + w, y0 + h
+    d.rounded_rectangle([x0, y0, x1, y1], radius=int(0.062 * S), fill=INK)
+
+    # 模拟内容：几组灰色横线，避开接缝位置
+    pad = int(0.055 * S)
+    th = int(0.0165 * S)
+    seam_ys = [int(y0 + h * f) for f in (0.3333, 0.6667)]
+    y = y0 + int(0.055 * S)
+    k = 0
+    while y < y1 - int(0.06 * S):
+        if any(abs(y - sy) < int(0.055 * S) for sy in seam_ys):
+            y += th + int(0.022 * S)
+            continue
+        lw = w - 2 * pad
+        if k % 4 == 3:                      # 每 4 行短一截，像段落末尾
+            lw = int(lw * 0.45)
+        d.rounded_rectangle([x0 + pad, y, x0 + pad + lw, y + th],
+                            radius=th // 2, fill=INK_SOFT)
+        y += th + int(0.022 * S)
+        k += 1
 
     # 两条接缝：白色横线，两端内缩，保持外轮廓仍是完整的一张长图
-    seam_h = int(0.0137 * S)         # 14/1024
-    inset = int(0.055 * S)           # 56/1024
-    for frac in (0.3333, 0.6667):
-        cy = int(y0 + col_h * frac)
-        d.rectangle([x0 + inset, cy - seam_h // 2,
-                     x1 - inset, cy + seam_h // 2 + 1],
-                    fill=(255, 255, 255))
+    sh = int(0.0125 * S)
+    inset = int(0.048 * S)
+    for sy in seam_ys:
+        d.rectangle([x0 + inset, sy - sh // 2, x1 - inset, sy + sh // 2], fill=BG)
 
     img = img.resize((SIZE, SIZE), Image.LANCZOS)
 

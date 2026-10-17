@@ -54,7 +54,9 @@ targets:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
-        UIUserInterfaceStyle: Light
+        # 注意：这里不能再写 UIUserInterfaceStyle: Light，
+        # 否则 Info.plist 会强制全 App 浅色，SwiftUI 的 .preferredColorScheme(.dark)
+        # 也压不住（系统级限制优先级更高），深色模式就完全不生效。
         NSPhotoLibraryUsageDescription: Splice 需要读取你最近的截图，用来识别重叠部分并拼接成长图。
         NSPhotoLibraryAddUsageDescription: Splice 需要把拼好的长图保存到你的相册。
 

@@ -4,10 +4,12 @@ import UIKit
 struct RootView: View {
     @EnvironmentObject private var model: SpliceModel
     @State private var showSettings = false
+    /// 点卡片进入的全屏预览（nil 表示不展示）
+    @State private var fullscreenResult: ResultVM?
 
     var body: some View {
         ZStack {
-            Color.white.ignoresSafeArea()
+            Color.appBG.ignoresSafeArea()
 
             VStack(spacing: 0) {
                 topBar
@@ -16,6 +18,10 @@ struct RootView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
+                .environmentObject(model)
+        }
+        .fullScreenCover(item: $fullscreenResult) { r in
+            FullscreenPreview(result: r)
                 .environmentObject(model)
         }
         .task {
@@ -91,13 +97,8 @@ struct RootView: View {
                 Task { await model.scan() }
             } label: {
                 Text("重新扫描")
-                    .font(.system(size: 16, weight: .medium))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 52)
-                    .background(Color.black)
-                    .foregroundStyle(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
+            .buttonStyle(PrimaryButtonStyle())
             .padding(.horizontal, 30)
             .padding(.bottom, 24)
         }
@@ -126,13 +127,8 @@ struct RootView: View {
                 }
             } label: {
                 Text("去设置里打开")
-                    .font(.system(size: 16, weight: .medium))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 52)
-                    .background(Color.black)
-                    .foregroundStyle(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
+            .buttonStyle(PrimaryButtonStyle())
             .padding(.horizontal, 30)
             .padding(.bottom, 24)
         }
@@ -172,13 +168,8 @@ struct RootView: View {
                 Task { await model.scan() }
             } label: {
                 Text("再来一次")
-                    .font(.system(size: 16, weight: .medium))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 52)
-                    .background(Color.black)
-                    .foregroundStyle(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
+            .buttonStyle(PrimaryButtonStyle())
             .padding(.horizontal, 30)
             .padding(.bottom, 24)
         }
@@ -203,13 +194,8 @@ struct RootView: View {
                 Task { await model.scan() }
             } label: {
                 Text("重试")
-                    .font(.system(size: 16, weight: .medium))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 52)
-                    .background(Color.black)
-                    .foregroundStyle(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
+            .buttonStyle(PrimaryButtonStyle())
             .padding(.horizontal, 30)
             .padding(.bottom, 24)
         }
@@ -218,54 +204,56 @@ struct RootView: View {
     // MARK: - 结果页
 
     private var doneView: some View {
-        VStack(spacing: 0) {
-            Text(model.statusText)
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .lineSpacing(4)
-                .padding(.horizontal, 30)
-                .padding(.bottom, 14)
+        // 用几何读取可用高度：预览区给到"屏幕高度的一半再多一点"，
+        // 不再写死 320 —— 320 在 iPhone 16 Pro 上只有屏幕的 37%，
+        // 长图缩成一条，接缝根本看不清。
+        GeometryReader { proxy in
+            let cardH = max(340, min(proxy.size.height * 0.60, 620))
+            VStack(spacing: 0) {
+                Text(model.statusText)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(4)
+                    .padding(.horizontal, 30)
+                    .padding(.bottom, 12)
 
-            ScrollView {
-                VStack(spacing: 26) {
-                    ForEach(model.results) { r in
-                        ResultCard(result: r)
-                            .environmentObject(model)
+                ScrollView {
+                    VStack(spacing: 26) {
+                        ForEach(model.results) { r in
+                            ResultCard(result: r, onTap: { fullscreenResult = r },
+                                       previewHeight: cardH)
+                                .environmentObject(model)
+                        }
                     }
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 16)
                 }
-                .padding(.horizontal, 24)
-                .padding(.bottom, 20)
-            }
 
-            VStack(spacing: 12) {
-                Toggle(isOn: $model.deleteOriginals) {
-                    Text("保存后删除原图（移到「最近删除」）")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                }
-                .toggleStyle(.switch)
-                .tint(.black)
-                .padding(.horizontal, 30)
+                VStack(spacing: 12) {
+                    Toggle(isOn: $model.deleteOriginals) {
+                        Text("保存后删除原图（移到「最近删除」）")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                    }
+                    .toggleStyle(.switch)
+                    .tint(Color.appPrimary)
+                    .padding(.horizontal, 30)
 
-                Button {
-                    Task { await model.confirmSave() }
-                } label: {
-                    Text(model.results.count > 1
-                         ? "确认保存 \(model.results.count) 张长图"
-                         : "确认保存")
-                        .font(.system(size: 16, weight: .medium))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 52)
-                        .background(Color.black)
-                        .foregroundStyle(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    Button {
+                        Task { await model.confirmSave() }
+                    } label: {
+                        Text(model.results.count > 1
+                             ? "确认保存 \(model.results.count) 张长图"
+                             : "确认保存")
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .padding(.horizontal, 30)
                 }
-                .padding(.horizontal, 30)
+                .padding(.top, 10)
+                .padding(.bottom, 16)
+                .background(Color.appBG)
             }
-            .padding(.top, 12)
-            .padding(.bottom, 20)
-            .background(Color.white)
         }
     }
 }
@@ -273,47 +261,64 @@ struct RootView: View {
 // MARK: - 单张结果卡片
 
 private struct ResultCard: View {
-    @EnvironmentObject private var model: SpliceModel
     let result: ResultVM
-
-    /// 拖动时累计的位移，松手才重拼
-    @State private var dragOffsets: [Int: CGFloat] = [:]
-    @State private var activeSeam: Int?
-
-    private var displayHeight: CGFloat { 320 }
+    /// 点一下进全屏
+    let onTap: () -> Void
+    /// 卡片里预览区的高度（由外层按屏幕高度算好传进来）
+    let previewHeight: CGFloat
 
     var body: some View {
         VStack(spacing: 10) {
-            ZStack(alignment: .top) {
+            ZStack {
                 if let img = result.preview {
                     GeometryReader { geo in
-                        let scale = geo.size.width / CGFloat(img.size.width)
-                        let h = CGFloat(img.size.height) * scale
+                        let w = geo.size.width
+                        let h = CGFloat(img.size.height) / CGFloat(max(img.size.width, 1)) * w
                         ScrollView(.vertical, showsIndicators: false) {
                             Image(uiImage: img)
                                 .resizable()
                                 .aspectRatio(contentMode: .fit)
-                                .frame(width: geo.size.width)
+                                .frame(width: w)
                                 .overlay(alignment: .topLeading) {
-                                    seamHandles(viewWidth: geo.size.width,
+                                    SeamOverlay(result: result,
                                                 imageHeight: h,
-                                                previewHeight: img.size.height)
+                                                viewWidth: w)
                                 }
                         }
-                        .frame(height: displayHeight)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .frame(height: previewHeight)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(Color.appHairline, lineWidth: 1)
                         )
                     }
-                    .frame(height: displayHeight)
+                    .frame(height: previewHeight)
                 } else {
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(Color(.systemGray6))
-                        .frame(height: displayHeight)
+                    RoundedRectangle(cornerRadius: 14)
+                        .fill(Color.appFill)
+                        .frame(height: previewHeight)
+                }
+
+                // 右下角"放大"提示，让用户知道可以点开
+                if result.preview != nil {
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .padding(7)
+                                .background(Color.black.opacity(0.45))
+                                .clipShape(Circle())
+                                .padding(10)
+                        }
+                    }
+                    .allowsHitTesting(false)
                 }
             }
+            .contentShape(Rectangle())
+            .onTapGesture { onTap() }
 
             HStack {
                 Text("\(result.pixelWidth) × \(result.pixelHeight)")
@@ -321,7 +326,7 @@ private struct ResultCard: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 if result.canAdjustSeams {
-                    Text("拖动接缝可微调")
+                    Text("左侧拖动接缝可微调")
                         .font(.system(size: 12))
                         .foregroundStyle(.tertiary)
                 } else {
@@ -332,46 +337,118 @@ private struct ResultCard: View {
             }
         }
     }
+}
 
-    /// 接缝手柄：把每条 cuts 换算成缩略图里的 y 坐标
-    @ViewBuilder
-    private func seamHandles(viewWidth: CGFloat, imageHeight: CGFloat, previewHeight: CGFloat) -> some View {
-        if result.canAdjustSeams && !result.cuts.isEmpty {
-            let k = imageHeight / CGFloat(max(result.pixelHeight, 1))
-            ForEach(Array(result.cuts.enumerated()), id: \.offset) { item in
-                let idx = item.offset
-                let cut = item.element
-                let baseY = CGFloat(cut) * k
-                let dy = dragOffsets[idx] ?? 0
-                SeamHandle(active: activeSeam == idx)
-                    .position(x: viewWidth / 2, y: max(0, baseY + dy))
-                    // 用 highPriorityGesture 抢在 ScrollView 之前拿到竖直拖动，
-                    // 否则手指一往下拉，滚的是整张长图而不是这条接缝。
-                    .highPriorityGesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { v in
-                                activeSeam = idx
-                                dragOffsets[idx] = v.translation.height
-                            }
-                            .onEnded { v in
-                                activeSeam = nil
-                                let scale = CGFloat(result.pixelHeight) / max(imageHeight, 1)
-                                let deltaPixels = Int((v.translation.height * scale).rounded())
-                                dragOffsets[idx] = nil
-                                if deltaPixels != 0 {
-                                    // 重拼在后台线程做（最高 30000px 的长图要几百毫秒），
-                                    // 所以这里必须包成 Task，不能直接同步调用。
-                                    Task {
-                                        await model.adjustCut(resultID: result.id,
-                                                              seamIndex: idx,
-                                                              deltaPixels: deltaPixels,
-                                                              displayScale: 1)
+// MARK: - 接缝拖动手柄（卡片与全屏共用）
+
+private struct SeamOverlay: View {
+    @EnvironmentObject private var model: SpliceModel
+    let result: ResultVM
+    /// 图片在屏幕上的实际显示高度
+    let imageHeight: CGFloat
+    let viewWidth: CGFloat
+
+    /// 拖动时累计的位移，松手才重拼
+    @State private var dragOffsets: [Int: CGFloat] = [:]
+    @State private var activeSeam: Int?
+
+    var body: some View {
+        Group {
+            if result.canAdjustSeams && !result.cuts.isEmpty && imageHeight > 1 {
+                let k = imageHeight / CGFloat(max(result.pixelHeight, 1))
+                // cuts 是"内容区坐标"（内容区第 0 行 = 长图第 chromeHeight 行），
+                // 所以换算成显示坐标要先加上保留的状态栏+导航栏高度，
+                // 否则手柄会整体偏上 top 像素。
+                let chrome = CGFloat(result.chromeHeight)
+                ForEach(Array(result.cuts.enumerated()), id: \.offset) { item in
+                    let idx = item.offset
+                    let baseY = (chrome + CGFloat(item.element)) * k
+                    let dy = dragOffsets[idx] ?? 0
+                    SeamHandle(active: activeSeam == idx)
+                        .position(x: viewWidth / 2, y: max(0, baseY + dy))
+                        // 用 highPriorityGesture 抢在 ScrollView 之前拿到竖直拖动，
+                        // 否则手指一往下拉，滚的是整张长图而不是这条接缝。
+                        .highPriorityGesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { v in
+                                    activeSeam = idx
+                                    dragOffsets[idx] = v.translation.height
+                                }
+                                .onEnded { v in
+                                    activeSeam = nil
+                                    let pxPerPoint = CGFloat(result.pixelHeight) / max(imageHeight, 1)
+                                    let deltaPixels = Int((v.translation.height * pxPerPoint).rounded())
+                                    dragOffsets[idx] = nil
+                                    if deltaPixels != 0 {
+                                        // 重拼在后台线程做（最高 30000px 的长图要几百毫秒），
+                                        // 所以这里必须包成 Task，不能直接同步调用。
+                                        Task {
+                                            await model.adjustCut(resultID: result.id,
+                                                                  seamIndex: idx,
+                                                                  deltaPixels: deltaPixels,
+                                                                  displayScale: 1)
+                                        }
                                     }
                                 }
-                            }
-                    )
+                        )
+                }
             }
         }
+    }
+}
+
+// MARK: - 全屏预览
+
+private struct FullscreenPreview: View {
+    @EnvironmentObject private var model: SpliceModel
+    @Environment(\.dismiss) private var dismiss
+
+    /// 传进来的是快照；拖动接缝后模型里的图会更新，所以这里按 id 重新取一次
+    let result: ResultVM
+
+    private var live: ResultVM {
+        model.results.first(where: { $0.id == result.id }) ?? result
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            Color.black.ignoresSafeArea()
+
+            if let img = live.preview {
+                GeometryReader { geo in
+                    let w = geo.size.width
+                    let h = CGFloat(img.size.height) / CGFloat(max(img.size.width, 1)) * w
+                    ScrollView(.vertical, showsIndicators: false) {
+                        Image(uiImage: img)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: w)
+                            .overlay(alignment: .topLeading) {
+                                SeamOverlay(result: live, imageHeight: h, viewWidth: w)
+                            }
+                    }
+                }
+                .ignoresSafeArea(edges: .bottom)
+            }
+
+            HStack {
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 34, height: 34)
+                        .background(Color.black.opacity(0.55))
+                        .clipShape(Circle())
+                }
+                .accessibilityLabel("关闭")
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 6)
+        }
+        .statusBarHidden(true)
     }
 }
 
@@ -408,13 +485,30 @@ private struct SeamHandle: View {
 struct SettingsView: View {
     @EnvironmentObject private var model: SpliceModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
+
+    private let repoURL = URL(string: "https://github.com/ZJZBS666/splice")!
+    private let authorURL = URL(string: "https://github.com/ZJZBS666")!
 
     var body: some View {
         NavigationStack {
             ZStack {
-                Color.white.ignoresSafeArea()
+                Color.appBG.ignoresSafeArea()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
+                        sectionTitle("外观")
+                        Picker("外观", selection: $model.themeMode) {
+                            ForEach(ThemeMode.allCases) { m in
+                                Text(m.label).tag(m)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .padding(.bottom, 8)
+                        Text("选「跟随系统」时，Splice 会跟着 iPhone 的浅色/深色设置自动切换。")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.tertiary)
+                            .padding(.bottom, 26)
+
                         sectionTitle("识别范围")
                         Picker("识别范围", selection: $model.windowMinutes) {
                             Text("最近 10 分钟").tag(10)
@@ -440,7 +534,7 @@ struct SettingsView: View {
                             }
                         }
                         .toggleStyle(.switch)
-                        .tint(.black)
+                        .tint(Color.appPrimary)
                         .padding(.bottom, 26)
 
                         sectionTitle("关于")
@@ -448,9 +542,28 @@ struct SettingsView: View {
                             .font(.system(size: 13))
                             .foregroundStyle(.secondary)
                             .lineSpacing(5)
+                            .padding(.bottom, 0)
                     }
                     .padding(.horizontal, 24)
                     .padding(.top, 8)
+                    .padding(.bottom, 12)
+
+                    VStack(spacing: 0) {
+                        Divider().opacity(0.6)
+                        linkRow(icon: "person.crop.circle",
+                                title: "作者",
+                                detail: "ZJZBS666") {
+                            openURL(authorURL)
+                        }
+                        Divider().opacity(0.6).padding(.leading, 52)
+                        linkRow(icon: "chevron.left.forwardslash.chevron.right",
+                                title: "项目源码",
+                                detail: "ZJZBS666/splice") {
+                            openURL(repoURL)
+                        }
+                        Divider().opacity(0.6)
+                    }
+                    .padding(.top, 18)
                 }
             }
             .navigationTitle("设置")
@@ -458,10 +571,37 @@ struct SettingsView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("完成") { dismiss() }
-                        .foregroundStyle(.black)
+                        .foregroundStyle(.primary)
                 }
             }
         }
+    }
+
+    /// 一行"可点开的链接"，右侧带一个小箭头
+    private func linkRow(icon: String, title: String, detail: String,
+                         action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 16))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24)
+                Text(title)
+                    .font(.system(size: 15))
+                    .foregroundStyle(.primary)
+                Spacer()
+                Text(detail)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 24)
+            .frame(height: 50)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private func sectionTitle(_ t: String) -> some View {
