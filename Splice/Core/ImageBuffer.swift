@@ -27,10 +27,12 @@ struct RGBABuffer: @unchecked Sendable {
 
     var bytesPerRow: Int { width * 4 }
 
-    /// 裁掉顶部 top 行、底部 bottom 行
+    /// 裁掉顶部 top 行、底部 bottom 行。
+    /// 不需要裁时直接返回自己，避免白拷一份（长图动辄 100MB 以上）。
     func cropped(top: Int, bottom: Int) -> RGBABuffer {
         let y0 = max(0, min(top, height))
         let y1 = max(y0, min(height - bottom, height))
+        if y0 == 0 && y1 == height { return self }
         let rows = y1 - y0
         var out = RGBABuffer(width: width, height: rows, colorSpace: colorSpace)
         if rows > 0 {

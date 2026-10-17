@@ -100,7 +100,10 @@ enum PhotoLibrary {
                                         pixelWidth: asset.pixelWidth,
                                         pixelHeight: asset.pixelHeight))
         }
-        let limit = 20
+        // 张数上限。每张截图贡献约 (2622 - 321 - 200) ≈ 2100 像素内容高，
+        // 30000 的输出上限最多也就 12~14 张；再多的部分拼出来必然被截断，
+        // 而且每张要占 ~12MB 原始像素 + ~12MB 灰度图，20 张会吃掉 500MB。
+        let limit = 12
         if items.count > limit {
             items = Array(items.suffix(limit))
         }
