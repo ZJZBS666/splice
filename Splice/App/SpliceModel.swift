@@ -54,15 +54,45 @@ final class SpliceModel: ObservableObject {
     @Published var progress: Double = 0
 
     /// 时间窗口（分钟）。用户要求 30 分钟。
-    @Published var windowMinutes: Int = 30
+    @Published var windowMinutes: Int = 30 {
+        didSet { defaults.set(windowMinutes, forKey: Keys.windowMinutes) }
+    }
     /// 是否保留第一张的状态栏+导航栏
-    @Published var keepFirstChrome: Bool = true
+    @Published var keepFirstChrome: Bool = true {
+        didSet { defaults.set(keepFirstChrome, forKey: Keys.keepFirstChrome) }
+    }
     /// 拼接完成后是否删除原图（移到最近删除）
-    @Published var deleteOriginals: Bool = true
+    @Published var deleteOriginals: Bool = true {
+        didSet { defaults.set(deleteOriginals, forKey: Keys.deleteOriginals) }
+    }
     /// 超过这个高度就提示
     let maxHeight = StitchParams.maxOutputHeight
 
     private var loadedImages: [Int: RGBABuffer] = [:]
+
+    private let defaults = UserDefaults.standard
+    private enum Keys {
+        static let windowMinutes = "splice.windowMinutes"
+        static let keepFirstChrome = "splice.keepFirstChrome"
+        static let deleteOriginals = "splice.deleteOriginals"
+    }
+
+    /// 读回上次的设置。
+    ///
+    /// 不存的话每次冷启动都会退回默认值：用户把识别范围改成 1 小时，
+    /// 下次打开又变回 30 分钟，会以为设置没生效。
+    init() {
+        if defaults.object(forKey: Keys.windowMinutes) != nil {
+            let v = defaults.integer(forKey: Keys.windowMinutes)
+            if v > 0 { windowMinutes = v }
+        }
+        if defaults.object(forKey: Keys.keepFirstChrome) != nil {
+            keepFirstChrome = defaults.bool(forKey: Keys.keepFirstChrome)
+        }
+        if defaults.object(forKey: Keys.deleteOriginals) != nil {
+            deleteOriginals = defaults.bool(forKey: Keys.deleteOriginals)
+        }
+    }
 
     // MARK: - 主流程
 
