@@ -74,10 +74,8 @@ final class SpliceModel: ObservableObject {
     @Published var deleteOriginals: Bool = true {
         didSet { defaults.set(deleteOriginals, forKey: Keys.deleteOriginals) }
     }
-    /// 外观：跟随系统 / 浅色 / 深色
-    @Published var themeMode: ThemeMode = .system {
-        didSet { defaults.set(themeMode.rawValue, forKey: Keys.themeMode) }
-    }
+    /// 外貌（浅色/深色）不放在这里：它由 `ThemeController` 单独管。
+    /// 原因见 Theme.swift 里的注释——放在 `@Published` 上会让整棵树重算。
     /// 超过这个高度就提示
     let maxHeight = StitchParams.maxOutputHeight
 
@@ -92,7 +90,6 @@ final class SpliceModel: ObservableObject {
         static let windowMinutes = "splice.windowMinutes"
         static let keepFirstChrome = "splice.keepFirstChrome"
         static let deleteOriginals = "splice.deleteOriginals"
-        static let themeMode = "splice.themeMode"
     }
 
     /// 读回上次的设置。
@@ -109,10 +106,6 @@ final class SpliceModel: ObservableObject {
         }
         if defaults.object(forKey: Keys.deleteOriginals) != nil {
             deleteOriginals = defaults.bool(forKey: Keys.deleteOriginals)
-        }
-        if let raw = defaults.string(forKey: Keys.themeMode),
-           let m = ThemeMode(rawValue: raw) {
-            themeMode = m
         }
     }
 

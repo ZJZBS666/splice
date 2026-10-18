@@ -14,7 +14,11 @@ struct RootView: View {
             VStack(spacing: 0) {
                 topBar
                 content
+                    // 阶段之间淡入淡出。原来是从「正在拼」直接换成结果页，
+                    // 几张几千像素高的卡片瞬间出现，观感很硬。
+                    .transition(.opacity)
             }
+            .animation(.smooth(duration: 0.30), value: model.phase)
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
@@ -204,57 +208,77 @@ struct RootView: View {
     // MARK: - 结果页
 
     private var doneView: some View {
-        // 用几何读取可用高度：预览区给到"屏幕高度的一半再多一点"，
-        // 不再写死 320 —— 320 在 iPhone 16 Pro 上只有屏幕的 37%，
-        // 长图缩成一条，接缝根本看不清。
+        // 预览区尽量吃满屏幕：底部操作区只留固定高度，剩下全给长图。
+        //
+        // 之前按「屏高 × 0.60」算，iPhone 16 Pro 上只有 431pt，而一张
+        // 1206×5709 的长图按宽度铺满后高度是 1632pt —— 431pt 的窗口只能看到
+        // 四分之一，接缝根本没法微调。现在把卡片高度提到"内容区减去底部操作区"，
+        // 同时把尺寸文字挪到图片上的浮动标签里，不再单独占一行。
         GeometryReader { proxy in
-            let cardH = max(340, min(proxy.size.height * 0.60, 620))
-            VStack(spacing: 0) {
-                Text(model.statusText)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .lineSpacing(4)
-                    .padding(.horizontal, 30)
-                    .padding(.bottom, 12)
+            // 底部操作区（状态行 + 开关 + 保存按钮 + 内边距）总共约 105pt，
+            // 这里按 108 预留，剩下全部给预览。尺寸文字与接缝提示已经改成
+            // 图片上的浮动标签，不再额外占一行高度。
+            let controlH: CGFloat = 108
+            let cardH = max(360, proxy.size.height - controlH)
 
+            VStack(spacing: 0) {
                 ScrollView {
-                    VStack(spacing: 26) {
+                    VStack(spacing: 18) {
                         ForEach(model.results) { r in
-                            ResultCard(result: r, onTap: { fullscreenResult = r },
+                            ResultCard(result: r,
+                                       onTap: { fullscreenResult = r },
                                        previewHeight: cardH)
                                 .environmentObject(model)
                         }
                     }
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 16)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 4)
                 }
 
-                VStack(spacing: 12) {
-                    Toggle(isOn: $model.deleteOriginals) {
-                        Text("保存后删除原图（移到「最近删除」）")
-                            .font(.system(size: 13))
-                            .foregroundStyle(.secondary)
-                    }
-                    .toggleStyle(.switch)
-                    .tint(Color.appPrimary)
-                    .padding(.horizontal, 30)
-
-                    Button {
-                        Task { await model.confirmSave() }
-                    } label: {
-                        Text(model.results.count > 1
-                             ? "确认保存 \(model.results.count) 张长图"
-                             : "确认保存")
-                    }
-                    .buttonStyle(PrimaryButtonStyle())
-                    .padding(.horizontal, 30)
-                }
-                .padding(.top, 10)
-                .padding(.bottom, 16)
-                .background(Color.appBG)
+                controlBar
             }
         }
+    }
+
+    /// 底部操作区：状态说明 + 开关同排，保存按钮独占一行。
+    ///
+    /// 之所以把开关和状态文字压到同一行：这一块每多占 40pt，
+    /// 上面的长图预览就少 40pt，而预览恰恰是最需要空间的地方。
+    private var controlBar: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 10) {
+                Text(model.statusText)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Spacer(minLength: 0)
+                Text("删原图")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+                Toggle("", isOn: $model.deleteOriginals)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .tint(Color.appPrimary)
+                    .fixedSize()
+            }
+            .padding(.horizontal, 22)
+
+            Button {
+                Task { await model.confirmSave() }
+            } label: {
+                Text(model.results.count > 1
+                     ? "确认保存 \(model.results.count) 张长图"
+                     : "确认保存")
+            }
+            .buttonStyle(PrimaryButtonStyle())
+            .padding(.horizontal, 24)
+        }
+        .padding(.top, 6)
+        .padding(.bottom, 8)
+        .frame(maxWidth: .infinity)
+        .background(Color.appBG)
     }
 }
 
@@ -268,74 +292,71 @@ private struct ResultCard: View {
     let previewHeight: CGFloat
 
     var body: some View {
-        VStack(spacing: 10) {
-            ZStack {
-                if let img = result.preview {
-                    GeometryReader { geo in
-                        let w = geo.size.width
-                        let h = CGFloat(img.size.height) / CGFloat(max(img.size.width, 1)) * w
-                        ScrollView(.vertical, showsIndicators: false) {
-                            Image(uiImage: img)
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .frame(width: w)
-                                .overlay(alignment: .topLeading) {
-                                    SeamOverlay(result: result,
-                                                imageHeight: h,
-                                                viewWidth: w)
-                                }
-                        }
-                        .frame(height: previewHeight)
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(Color.appHairline, lineWidth: 1)
-                        )
+        ZStack {
+            if let img = result.preview {
+                GeometryReader { geo in
+                    let w = geo.size.width
+                    let h = CGFloat(img.size.height) / CGFloat(max(img.size.width, 1)) * w
+                    ScrollView(.vertical, showsIndicators: false) {
+                        Image(uiImage: img)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: w)
+                            .overlay(alignment: .topLeading) {
+                                SeamOverlay(result: result,
+                                            imageHeight: h,
+                                            viewWidth: w)
+                            }
                     }
                     .frame(height: previewHeight)
-                } else {
-                    RoundedRectangle(cornerRadius: 14)
-                        .fill(Color.appFill)
-                        .frame(height: previewHeight)
+                    .appCorner(AppRadius.card)
+                    .appCornerBorder(AppRadius.card)
                 }
-
-                // 右下角"放大"提示，让用户知道可以点开
-                if result.preview != nil {
-                    VStack {
-                        Spacer()
-                        HStack {
-                            Spacer()
-                            Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .padding(7)
-                                .background(Color.black.opacity(0.45))
-                                .clipShape(Circle())
-                                .padding(10)
-                        }
-                    }
-                    .allowsHitTesting(false)
-                }
+                .frame(height: previewHeight)
+            } else {
+                RoundedRectangle(cornerRadius: AppRadius.card, style: .continuous)
+                    .fill(Color.appFill)
+                    .frame(height: previewHeight)
             }
-            .contentShape(Rectangle())
-            .onTapGesture { onTap() }
 
-            HStack {
-                Text("\(result.pixelWidth) × \(result.pixelHeight)")
-                    .font(.system(size: 12).monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if result.canAdjustSeams {
-                    Text("左侧拖动接缝可微调")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.tertiary)
-                } else {
-                    Text("有接缝未识别，已直接拼接")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.tertiary)
+            // 尺寸 + 接缝提示 + "放大"角标：都浮在图片上，不再额外占一行高度。
+            if result.preview != nil {
+                VStack {
+                    Spacer()
+                    HStack(alignment: .bottom, spacing: 8) {
+                        infoChip
+                        Spacer(minLength: 0)
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(7)
+                            .background(Color.black.opacity(0.45))
+                            .clipShape(Circle())
+                    }
+                    .padding(10)
                 }
+                .allowsHitTesting(false)
             }
         }
+        .contentShape(Rectangle())
+        .onTapGesture { onTap() }
+    }
+
+    /// 压在图片左下角的信息标签
+    private var infoChip: some View {
+        HStack(spacing: 6) {
+            Text("\(result.pixelWidth) × \(result.pixelHeight)")
+                .monospacedDigit()
+            Text("·")
+            Text(result.canAdjustSeams ? "拖动接缝微调" : "有接缝未识别")
+        }
+        .font(.system(size: 10, weight: .medium))
+        .foregroundStyle(.white)
+        .lineLimit(1)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Color.black.opacity(0.45))
+        .appCorner(9)
     }
 }
 
@@ -487,6 +508,9 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
 
+    /// 外观单独观察 `ThemeController`，不走 `SpliceModel`。
+    @ObservedObject private var theme = ThemeController.shared
+
     private let repoURL = URL(string: "https://github.com/ZJZBS666/splice")!
     private let authorURL = URL(string: "https://github.com/ZJZBS666")!
 
@@ -497,7 +521,13 @@ struct SettingsView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         sectionTitle("外观")
-                        Picker("外观", selection: $model.themeMode) {
+                        // 用自定义 Binding 而不是 $theme.mode：切换要走
+                        // ThemeController.set()，那里才会先截屏再改模式，
+                        // 做出「旧画面淡出、新画面淡入」的过渡。
+                        Picker("外观", selection: Binding(
+                            get: { theme.mode },
+                            set: { theme.set($0) }
+                        )) {
                             ForEach(ThemeMode.allCases) { m in
                                 Text(m.label).tag(m)
                             }
