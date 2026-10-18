@@ -2,7 +2,8 @@
 
 设计（用户从 12 个候选里选定的 A 方案）：
   极简白底 + 一条竖直的黑色圆角长图，长图里画几行灰色文字横线，
-  中间两条白色接缝横线 —— 直接表达"几张截图拼成一张长图"。
+  中间两条接缝横线 —— 直接表达"几张截图拼成一张长图"。
+  上面那条接缝用白色；下面那条用 #FC8E03（橙），给纯黑白的画面一个落点。
 
 选 A 而不是用深色底方案的理由：用户在 Windows 上看到的就是白底效果，
 在浅色壁纸的主屏上白底图标更干净；且"长图 + 内容行"最直白地说明用途。
@@ -17,6 +18,8 @@ S = SIZE * SS
 BG = (255, 255, 255)
 INK = (10, 10, 10)
 INK_SOFT = (58, 58, 60)
+# 下面那条接缝用的橙色 #FC8E03
+ACCENT = (0xFC, 0x8E, 0x03)
 
 
 def main():
@@ -49,11 +52,13 @@ def main():
         y += th + int(0.022 * S)
         k += 1
 
-    # 两条接缝：白色横线，两端内缩，保持外轮廓仍是完整的一张长图
+    # 两条接缝：横线两端内缩，保持外轮廓仍是完整的一张长图。
+    # 上面一条白色，下面一条 #FC8E03。
     sh = int(0.0125 * S)
     inset = int(0.048 * S)
-    for sy in seam_ys:
-        d.rectangle([x0 + inset, sy - sh // 2, x1 - inset, sy + sh // 2], fill=BG)
+    seam_colors = [BG, ACCENT]
+    for sy, col in zip(seam_ys, seam_colors):
+        d.rectangle([x0 + inset, sy - sh // 2, x1 - inset, sy + sh // 2], fill=col)
 
     img = img.resize((SIZE, SIZE), Image.LANCZOS)
 
