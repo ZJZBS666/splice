@@ -537,9 +537,7 @@ struct SettingsView: View {
                                 }
                             }
                             .pickerStyle(.segmented)
-                            footnote: {
-                                Text("选「跟随系统」时，Splice 会跟着 iPhone 的浅色/深色设置自动切换。")
-                            }
+                            hint("选「跟随系统」时，Splice 会跟着 iPhone 的浅色/深色设置自动切换。")
                         }
 
                         section("识别范围") {
@@ -550,9 +548,7 @@ struct SettingsView: View {
                                 Text("最近 3 小时").tag(180)
                             }
                             .pickerStyle(.segmented)
-                            footnote: {
-                                Text("Splice 只在这个时间范围里找截图。")
-                            }
+                            hint("Splice 只在这个时间范围里找截图。")
                         }
 
                         section("顶部保留") {
@@ -567,9 +563,7 @@ struct SettingsView: View {
                             }
                             .toggleStyle(.switch)
                             .tint(Color.appPrimary)
-                            footnote: {
-                                Text("顶部这一条只会保留一次。")
-                            }
+                            hint("顶部这一条只会保留一次。")
                         }
 
                         section("关于") {
@@ -651,29 +645,26 @@ struct SettingsView: View {
         .appCorner(AppRadius.row)
     }
 
-    /// 一个小标题 + 一张分组卡片；`footnote` 是卡片里、控件下面的说明文字。
-    @ViewBuilder
-    private func section<C: View, F: View>(_ title: String,
-                                          @ViewBuilder _ content: () -> C,
-                                          @ViewBuilder footnote: () -> F) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            sectionTitle(title)
-            groupCard {
-                VStack(alignment: .leading, spacing: 10) {
-                    content()
-                    footnote()
-                }
-            }
-        }
+    /// 分组卡片里、控件下面那行小字说明。
+    private func hint(_ s: String) -> some View {
+        Text(s)
+            .font(.system(size: 12))
+            .foregroundStyle(.tertiary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// 只有内容、没有说明文字的分组。
+    /// 一个小标题 + 一张分组卡片。
     @ViewBuilder
     private func section<C: View>(_ title: String,
                                   @ViewBuilder _ content: () -> C) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             sectionTitle(title)
-            groupCard { content() }
+            groupCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    content()
+                }
+            }
         }
     }
 
