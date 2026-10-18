@@ -22,6 +22,8 @@ prototype/out/
 prototype/*.png
 _artifact/
 _dl/
+_dl*/
+_sheet*/
 
 # Python
 __pycache__/
@@ -37,3 +39,4 @@ icons_preview/
 .idea/
 *.swp
 _commit_msg.txt
+*.zip
