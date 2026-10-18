@@ -23,6 +23,8 @@ struct RootView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
                 .environmentObject(model)
+                // 让 sheet 的圆角也走连续曲率，和系统设置页一致
+                .presentationCornerRadius(AppRadius.sheet)
         }
         .fullScreenCover(item: $fullscreenResult) { r in
             FullscreenPreview(result: r)
@@ -356,7 +358,7 @@ private struct ResultCard: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
         .background(Color.black.opacity(0.45))
-        .appCorner(9)
+        .appCorner(AppRadius.small)
     }
 }
 
@@ -517,83 +519,84 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                Color.appBG.ignoresSafeArea()
+                // iOS 设置页的底色是 grouped 底（浅色下浅灰、深色下更黑），
+                // 内容放在白色的分组卡片里，靠明度差分组。
+                Color.appGroupedBG.ignoresSafeArea()
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        sectionTitle("外观")
-                        // 用自定义 Binding 而不是 $theme.mode：切换要走
-                        // ThemeController.set()，那里才会先截屏再改模式，
-                        // 做出「旧画面淡出、新画面淡入」的过渡。
-                        Picker("外观", selection: Binding(
-                            get: { theme.mode },
-                            set: { theme.set($0) }
-                        )) {
-                            ForEach(ThemeMode.allCases) { m in
-                                Text(m.label).tag(m)
+                    VStack(alignment: .leading, spacing: 22) {
+                        section("外观") {
+                            // 用自定义 Binding 而不是 $theme.mode：切换要走
+                            // ThemeController.set()，那里才会先截屏再改模式，
+                            // 做出「旧画面淡出、新画面淡入」的过渡。
+                            Picker("外观", selection: Binding(
+                                get: { theme.mode },
+                                set: { theme.set($0) }
+                            )) {
+                                ForEach(ThemeMode.allCases) { m in
+                                    Text(m.label).tag(m)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            footnote: {
+                                Text("选「跟随系统」时，Splice 会跟着 iPhone 的浅色/深色设置自动切换。")
                             }
                         }
-                        .pickerStyle(.segmented)
-                        .padding(.bottom, 8)
-                        Text("选「跟随系统」时，Splice 会跟着 iPhone 的浅色/深色设置自动切换。")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.tertiary)
-                            .padding(.bottom, 26)
 
-                        sectionTitle("识别范围")
-                        Picker("识别范围", selection: $model.windowMinutes) {
-                            Text("最近 10 分钟").tag(10)
-                            Text("最近 30 分钟").tag(30)
-                            Text("最近 1 小时").tag(60)
-                            Text("最近 3 小时").tag(180)
-                        }
-                        .pickerStyle(.segmented)
-                        .padding(.bottom, 8)
-                        Text("Splice 只在这个时间范围里找截图。")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.tertiary)
-                            .padding(.bottom, 26)
-
-                        sectionTitle("顶部保留")
-                        Toggle(isOn: $model.keepFirstChrome) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("保留第一张的状态栏和导航栏")
-                                    .font(.system(size: 15))
-                                Text("关掉后长图顶部直接是内容")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.tertiary)
+                        section("识别范围") {
+                            Picker("识别范围", selection: $model.windowMinutes) {
+                                Text("最近 10 分钟").tag(10)
+                                Text("最近 30 分钟").tag(30)
+                                Text("最近 1 小时").tag(60)
+                                Text("最近 3 小时").tag(180)
+                            }
+                            .pickerStyle(.segmented)
+                            footnote: {
+                                Text("Splice 只在这个时间范围里找截图。")
                             }
                         }
-                        .toggleStyle(.switch)
-                        .tint(Color.appPrimary)
-                        .padding(.bottom, 26)
 
-                        sectionTitle("关于")
-                        Text("Splice 会把最近的截图按时间顺序自动识别重叠部分，去掉重复后拼成一张长图。识别不出来时会在接缝处加一条细分隔线，你可以拖动接缝微调。")
-                            .font(.system(size: 13))
-                            .foregroundStyle(.secondary)
-                            .lineSpacing(5)
-                            .padding(.bottom, 0)
-                    }
-                    .padding(.horizontal, 24)
-                    .padding(.top, 8)
-                    .padding(.bottom, 12)
+                        section("顶部保留") {
+                            Toggle(isOn: $model.keepFirstChrome) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("保留第一张的状态栏和导航栏")
+                                        .font(.system(size: 15))
+                                    Text("关掉后长图顶部直接是内容")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.tertiary)
+                                }
+                            }
+                            .toggleStyle(.switch)
+                            .tint(Color.appPrimary)
+                            footnote: {
+                                Text("顶部这一条只会保留一次。")
+                            }
+                        }
 
-                    VStack(spacing: 0) {
-                        Divider().opacity(0.6)
-                        linkRow(icon: "person.crop.circle",
-                                title: "作者",
-                                detail: "ZJZBS666") {
-                            openURL(authorURL)
+                        section("关于") {
+                            Text("Splice 会把最近的截图按时间顺序自动识别重叠部分，去掉重复后拼成一张长图。识别不出来时会在接缝处加一条细分隔线，你可以拖动接缝微调。")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                                .lineSpacing(5)
                         }
-                        Divider().opacity(0.6).padding(.leading, 52)
-                        linkRow(icon: "chevron.left.forwardslash.chevron.right",
-                                title: "项目源码",
-                                detail: "ZJZBS666/splice") {
-                            openURL(repoURL)
+
+                        groupCard {
+                            linkRow(icon: "person.crop.circle",
+                                    title: "作者",
+                                    detail: "ZJZBS666") {
+                                openURL(authorURL)
+                            }
+                            Divider().padding(.leading, 44)
+                            linkRow(icon: "chevron.left.forwardslash.chevron.right",
+                                    title: "项目源码",
+                                    detail: "ZJZBS666/splice") {
+                                openURL(repoURL)
+                            }
                         }
-                        Divider().opacity(0.6)
+                        .padding(.top, 2)
                     }
-                    .padding(.top, 18)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 6)
+                    .padding(.bottom, 28)
                 }
             }
             .navigationTitle("设置")
@@ -623,15 +626,55 @@ struct SettingsView: View {
                 Text(detail)
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
-                Image(systemName: "arrow.up.right")
-                    .font(.system(size: 11, weight: .semibold))
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.tertiary)
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, 8)
             .frame(height: 50)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    /// iOS 设置页那种"inset grouped"分组卡片：
+    /// 卡片本身是页面底色的对比色（浅色下白、深色下深灰），圆角走连续曲率。
+    @ViewBuilder
+    private func groupCard<C: View>(@ViewBuilder _ content: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(Color.appBG)
+        .appCorner(AppRadius.row)
+    }
+
+    /// 一个小标题 + 一张分组卡片；`footnote` 是卡片里、控件下面的说明文字。
+    @ViewBuilder
+    private func section<C: View, F: View>(_ title: String,
+                                          @ViewBuilder _ content: () -> C,
+                                          @ViewBuilder footnote: () -> F) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionTitle(title)
+            groupCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    content()
+                    footnote()
+                }
+            }
+        }
+    }
+
+    /// 只有内容、没有说明文字的分组。
+    @ViewBuilder
+    private func section<C: View>(_ title: String,
+                                  @ViewBuilder _ content: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionTitle(title)
+            groupCard { content() }
+        }
     }
 
     private func sectionTitle(_ t: String) -> some View {
@@ -639,7 +682,8 @@ struct SettingsView: View {
             .font(.system(size: 11, weight: .semibold))
             .tracking(1.4)
             .foregroundStyle(.tertiary)
-            .padding(.bottom, 10)
+            .padding(.leading, 4)
+            .padding(.bottom, 8)
     }
 }
 

@@ -44,19 +44,27 @@ enum ThemeMode: String, CaseIterable, Identifiable {
 
 /// 统一圆角尺度。
 ///
-/// iOS 的圆角不是纯圆弧，而是"连续曲率"（squircle）。SwiftUI 里对应
-/// `RoundedRectangle(..., style: .continuous)`；纯 `cornerRadius:` 默认是
-/// `.circular`，看起来会比系统更"方"一点。所以这里所有圆角都走
-/// `appCorner(_:)`，样式固定为 `.continuous`，只调半径。
+/// iOS 的圆角不是纯圆弧，而是"连续曲率"（squircle，苹果官方叫
+/// continuous corner）。SwiftUI 里对应
+/// `RoundedRectangle(..., style: .continuous)`；纯 `cornerRadius:`
+/// 默认是 `.circular`，也就是一段 1/4 圆弧直接接到直边上，
+/// **曲率在接点处是突变的**，所以看起来比系统"方"、也更机械。
+///
+/// 这里所有圆角都走 `appCorner(_:)`，样式固定 `.continuous`，只调半径。
+/// 半径要给足 —— 连续圆角和普通圆角在 r 很小时（比如 12 以下）几乎看不出
+/// 区别，只有半径占到元素短边的 1/3 以上，才能看出苹果那种"饱满又收紧"
+/// 的手感。
 enum AppRadius {
     /// 小标签、角标
-    static let small: CGFloat = 12
-    /// 大按钮
-    static let button: CGFloat = 16
+    static let small: CGFloat = 10
+    /// 设置页的分组卡片
+    static let row: CGFloat = 14
+    /// 大按钮（52pt 高，半径 20 ≈ 短边的 0.38）
+    static let button: CGFloat = 20
     /// 图片卡片
-    static let card: CGFloat = 20
+    static let card: CGFloat = 26
     /// 弹出的页面（sheet）
-    static let sheet: CGFloat = 28
+    static let sheet: CGFloat = 38
 }
 
 extension View {
@@ -88,6 +96,8 @@ extension View {
 extension Color {
     /// 页面底色
     static let appBG = Color(.systemBackground)
+    /// 分组页的底色（设置页用，浅色下是浅灰，深色下比卡片更暗）
+    static let appGroupedBG = Color(.systemGroupedBackground)
     /// 次级容器底色（占位块等）
     static let appFill = Color(.secondarySystemBackground)
     /// 主按钮背景
